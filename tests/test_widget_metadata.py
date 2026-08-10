@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from nitrostack import injectable, tool, widget, module, ExecutionContext
 from nitrostack.testing import NitroTestingModule
 from pydantic import BaseModel
+import mcp.types as types
 
 class DummyInput(BaseModel):
     pass
@@ -36,9 +37,12 @@ async def main():
     # 1. Initialize test harness
     harness = await NitroTestingModule.create(WidgetTestModule)
     
-    # 2. Extract tools from FastMCP server
-    tools = await harness.app.mcp_server.list_tools()
-    
+    # 2. Extract tools by invoking the registered `tools/list` handler directly
+    #    (the owned low-level Server has no FastMCP-style `list_tools()` convenience method)
+    list_tools_handler = harness.app.mcp_server.request_handlers[types.ListToolsRequest]
+    list_result = await list_tools_handler(None)
+    tools = list_result.root.tools
+
     # Find our tool
     target_tool = None
     for t in tools:

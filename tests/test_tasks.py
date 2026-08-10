@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from nitrostack import module, injectable, tool, ExecutionContext, NitroTestingModule
 import mcp.types as types
 from mcp.server.lowlevel.server import request_ctx, RequestContext
+from mcp.server.experimental.request_context import Experimental
 
 class AsyncTaskInput(BaseModel):
     duration: float
@@ -56,7 +57,7 @@ async def _test_all_tasks():
         )
     )
     
-    handler = harness.app.mcp_server._mcp_server.request_handlers[types.CallToolRequest]
+    handler = harness.app.mcp_server.request_handlers[types.CallToolRequest]
     
     # Manually set request_ctx to simulate LowLevelServer._handle_request
     token = request_ctx.set(RequestContext(
@@ -64,6 +65,7 @@ async def _test_all_tasks():
         meta=None,
         session=None,
         lifespan_context=None,
+        experimental=Experimental(task_metadata=req.params.task),
         request=req
     ))
     try:
@@ -82,7 +84,7 @@ async def _test_all_tasks():
         method="tasks/list",
         params=types.PaginatedRequestParams()
     )
-    list_handler = harness.app.mcp_server._mcp_server.request_handlers[types.ListTasksRequest]
+    list_handler = harness.app.mcp_server.request_handlers[types.ListTasksRequest]
     list_res = await list_handler(list_req)
     print("Tasks list count:", len(list_res.tasks))
     assert len(list_res.tasks) >= 1
@@ -94,7 +96,7 @@ async def _test_all_tasks():
         method="tasks/get",
         params=types.GetTaskRequestParams(taskId=task_id)
     )
-    get_handler = harness.app.mcp_server._mcp_server.request_handlers[types.GetTaskRequest]
+    get_handler = harness.app.mcp_server.request_handlers[types.GetTaskRequest]
     get_res = await get_handler(get_req)
     print("Task status:", get_res.status)
     assert get_res.status == "working"
@@ -105,7 +107,7 @@ async def _test_all_tasks():
         method="tasks/result",
         params=types.GetTaskPayloadRequestParams(taskId=task_id)
     )
-    result_handler = harness.app.mcp_server._mcp_server.request_handlers[types.GetTaskPayloadRequest]
+    result_handler = harness.app.mcp_server.request_handlers[types.GetTaskPayloadRequest]
     result_res = await result_handler(result_req)
     print("Result response content:", result_res.content)
     assert result_res.isError is False
@@ -132,6 +134,7 @@ async def _test_all_tasks():
         meta=None,
         session=None,
         lifespan_context=None,
+        experimental=Experimental(task_metadata=req_cancel.params.task),
         request=req_cancel
     ))
     try:
@@ -155,7 +158,7 @@ async def _test_all_tasks():
         method="tasks/cancel",
         params=types.CancelTaskRequestParams(taskId=task_id_cancel)
     )
-    cancel_handler = harness.app.mcp_server._mcp_server.request_handlers[types.CancelTaskRequest]
+    cancel_handler = harness.app.mcp_server.request_handlers[types.CancelTaskRequest]
     cancel_res = await cancel_handler(cancel_req)
     print("Cancellation response status:", cancel_res.status)
     assert cancel_res.status == "cancelled"

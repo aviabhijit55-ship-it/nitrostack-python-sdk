@@ -1,0 +1,62 @@
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+.ENV/
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.cache/
+
+# Logs
+*.log
+nitrostack.log
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local scaffold / scratch projects (not part of the SDK)
+adv-proj/
+new-mcp-server/
+
+# Node widgets (if installed locally in examples/templates)
+node_modules/
+.next/
