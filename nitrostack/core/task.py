@@ -69,7 +69,7 @@ class TaskData:
     without a TTL have ``expires_at is None`` and never expire.
 
     Compatibility aliases (``task_id``, ``status_message``, ``ttl``) mirror the
-    previous task-entry attribute names used by the public ``TaskRegistry`` API.
+    previous task-entry attribute names used by callers.
     """
 
     id: str
@@ -307,67 +307,3 @@ class TaskManager:
     def _snapshot(data: TaskData) -> TaskData:
         """Return a shallow copy so callers cannot mutate internal state."""
         return replace(data)
-
-
-class TaskRegistry:
-    """
-    Deprecated public compatibility facade over :class:`TaskManager`.
-
-    Prefer :class:`TaskManager` for new code. ``McpApplication`` uses a dedicated
-    ``TaskManager`` instance; this facade keeps the historical classmethod API
-    (``from nitrostack import TaskRegistry``) working for external callers.
-
-    Behavioral notes vs the pre-Phase-1 registry:
-    - Missing-task mutations remain no-ops (same as before).
-    - Invalid transitions on existing tasks follow Phase 1 validation (may raise).
-    - ``get_task`` still returns ``None`` when the ID is unknown.
-    """
-
-    _manager: TaskManager = TaskManager()
-
-    @classmethod
-    def create_task(cls, task_id: str, ttl: Optional[int] = None) -> TaskData:
-        return cls._manager.create_task(ttl_seconds=ttl, task_id=task_id)
-
-    @classmethod
-    def get_task(cls, task_id: str) -> Optional[TaskData]:
-        try:
-            return cls._manager.get_task(task_id)
-        except TaskNotFoundError:
-            return None
-
-    @classmethod
-    def list_tasks(cls) -> List[TaskData]:
-        return cls._manager.list_tasks()
-
-    @classmethod
-    def update_progress(cls, task_id: str, message: str) -> None:
-        try:
-            cls._manager.update_progress(task_id, message)
-        except (TaskNotFoundError, TaskAlreadyTerminalError, TaskExpiredError):
-            return
-
-    @classmethod
-    def cancel_task(cls, task_id: str) -> None:
-        try:
-            cls._manager.cancel_task(task_id)
-        except (TaskNotFoundError, TaskAlreadyTerminalError, TaskExpiredError):
-            return
-
-    @classmethod
-    def is_task_cancelled(cls, task_id: str) -> bool:
-        return cls._manager.is_task_cancelled(task_id)
-
-    @classmethod
-    def complete_task(cls, task_id: str, result: Any) -> None:
-        try:
-            cls._manager.complete_task(task_id, result)
-        except (TaskNotFoundError, TaskAlreadyTerminalError, TaskExpiredError, InvalidTaskTransitionError):
-            return
-
-    @classmethod
-    def fail_task(cls, task_id: str, error: Any) -> None:
-        try:
-            cls._manager.fail_task(task_id, error)
-        except (TaskNotFoundError, TaskAlreadyTerminalError, TaskExpiredError, InvalidTaskTransitionError):
-            return

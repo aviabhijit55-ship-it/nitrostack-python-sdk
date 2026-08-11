@@ -29,7 +29,6 @@ from nitrostack.core.task import (
     TERMINAL_STATUSES,
     TaskData,
     TaskManager,
-    TaskRegistry,
     TaskStatus,
     is_terminal_status,
 )
@@ -353,38 +352,6 @@ class TestTaskContext:
 # Exception classes
 # ===========================================================================
 
-class TestTaskRegistryCompat:
-    """Public TaskRegistry facade must remain importable and usable."""
-
-    def test_public_import(self):
-        from nitrostack import TaskRegistry as PublicRegistry
-
-        assert PublicRegistry is TaskRegistry
-
-    def test_create_get_complete_flow(self):
-        TaskRegistry.create_task("compat-task-1", ttl=30)
-        entry = TaskRegistry.get_task("compat-task-1")
-        assert entry is not None
-        assert entry.task_id == "compat-task-1"
-        assert entry.ttl == 30
-        TaskRegistry.update_progress("compat-task-1", "moving")
-        TaskRegistry.complete_task("compat-task-1", "done")
-        done = TaskRegistry.get_task("compat-task-1")
-        assert done is not None
-        assert done.status == TaskStatus.COMPLETED
-        assert done.result == "done"
-        assert done.status_message == "Task completed successfully"
-
-    def test_get_missing_returns_none(self):
-        assert TaskRegistry.get_task("does-not-exist") is None
-
-    def test_context_task_cancelled_error_import_path(self):
-        from nitrostack.core.context import TaskCancelledError as FromContext
-        from nitrostack.core.errors import TaskCancelledError as FromErrors
-
-        assert FromContext is FromErrors
-
-
 class TestTaskExceptions:
     def test_task_not_found_error_message(self):
         err = TaskNotFoundError("abc")
@@ -414,6 +381,12 @@ class TestTaskExceptions:
         assert data.id == "x"
         assert data.result is None
         assert data.expires_at is None
+
+    def test_context_task_cancelled_error_import_path(self):
+        from nitrostack.core.context import TaskCancelledError as FromContext
+        from nitrostack.core.errors import TaskCancelledError as FromErrors
+
+        assert FromContext is FromErrors
 
 
 # ===========================================================================

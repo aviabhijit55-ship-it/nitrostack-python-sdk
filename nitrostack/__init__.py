@@ -22,7 +22,6 @@ from nitrostack.core.task import (
     TaskManager,
     TaskData,
     TaskStatus,
-    TaskRegistry,
     TERMINAL_STATUSES,
     is_terminal_status,
 )
@@ -136,7 +135,6 @@ __all__ = [
     "TaskManager",
     "TaskData",
     "TaskStatus",
-    "TaskRegistry",
     "TERMINAL_STATUSES",
     "is_terminal_status",
     "TaskNotFoundError",
