@@ -17,10 +17,14 @@ from nitrostack.core.context import (
     ExecutionContext,
     AuthContext,
     TaskContext,
-    TaskCancelledError,
 )
 from nitrostack.core.task import (
+    TaskManager,
+    TaskData,
+    TaskStatus,
     TaskRegistry,
+    TERMINAL_STATUSES,
+    is_terminal_status,
 )
 from nitrostack.core.di import (
     injectable,
@@ -39,6 +43,11 @@ from nitrostack.core.errors import (
     ValidationError,
     ResourceNotFoundError,
     PromptNotFoundError,
+    TaskCancelledError,
+    TaskNotFoundError,
+    TaskAlreadyTerminalError,
+    InvalidTaskTransitionError,
+    TaskExpiredError,
 )
 from nitrostack.core.pipeline import (
     use_guards,
@@ -124,5 +133,14 @@ __all__ = [
     "NitroTestingModule",
     "TaskContext",
     "TaskCancelledError",
+    "TaskManager",
+    "TaskData",
+    "TaskStatus",
     "TaskRegistry",
+    "TERMINAL_STATUSES",
+    "is_terminal_status",
+    "TaskNotFoundError",
+    "TaskAlreadyTerminalError",
+    "InvalidTaskTransitionError",
+    "TaskExpiredError",
 ]
