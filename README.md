@@ -161,9 +161,34 @@ The SDK reads standard settings from the environment or `.env` files:
 | `PORT` / `MCP_SERVER_PORT` | The port to bind for HTTP/SSE transport (default: `8000`). |
 | `MCP_TRANSPORT_TYPE` | Transport selection: `stdio`, `http`, or `dual` (combining stdio + HTTP/SSE). |
 | `NODE_ENV` | If set to `production`, defaults to `dual` transport. Otherwise defaults to `stdio`. |
+| `MCP_MAX_SESSIONS` | Cap on concurrent Streamable HTTP sessions; new sessions beyond the cap get an HTTP `429`. Unset = unlimited. |
+| `MCP_SESSION_TIMEOUT_MS` | Idle timeout (ms) for stateful HTTP sessions; sessions with no activity for this long are terminated automatically. Unset = no timeout. |
+| `MCP_GRACEFUL_SHUTDOWN_TIMEOUT_MS` | How long (ms) the HTTP transport waits for in-flight requests to finish when shutting down (default: `10000`). |
+| `MCP_STATELESS` | Set to `true` to run the HTTP transport in stateless mode: every request gets a fresh context with no session id and no `initialize` handshake required. |
+| `MCP_ALLOWED_HOSTS` / `MCP_ALLOWED_ORIGINS` | Comma-separated allow-lists for DNS-rebinding protection, used only when CORS is disabled. |
 | `NITROSTACK_LOG_FILE` | Destination file for logs (default: `nitrostack.log`). |
 | `NITROSTACK_LOG_LEVEL` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
 | `NITROSTACK_LOG_TO_STDOUT` | Set to `true` to allow logging to stdout under stdio transport (Caution: may corrupt protocol stream). |
+
+---
+
+## Transport Options
+
+NitroStack apps can run over three transports, selected via `MCP_TRANSPORT_TYPE` (or `ServerConfig(transport_type=...)`):
+
+- **`stdio`** (default outside production): JSON-RPC over stdin/stdout — the standard mode for desktop MCP clients (Claude Desktop, Cursor, etc.).
+- **`http`**: Streamable HTTP + legacy SSE over a real network port, for cloud/remote deployments. Exposes:
+  - `POST/GET/DELETE /mcp` — Streamable HTTP (session-based JSON-RPC + SSE streaming)
+  - `GET /sse` + `POST /mcp/messages/` — legacy HTTP+SSE for older clients (trailing slash required so messages aren't swallowed by the Streamable HTTP `/mcp` mount)
+  - `GET /mcp/health` — health check (`status`, active session count, uptime)
+  - Per-session isolation, idle-session timeouts, and DNS-rebinding protection are provided by the underlying `mcp` SDK's `StreamableHTTPSessionManager`; NitroStack adds CORS, a concurrent-session cap, and the health endpoint on top.
+  - Task-mode tools that call `context.task.update_progress(...)` push a live `notifications/progress` event over the session's SSE stream (in addition to always being pollable via `tasks/get`) whenever the client sends a `_meta.progressToken` on the `tools/call` request.
+- **`dual`** (default in production): runs `stdio` and `http` concurrently as `asyncio` tasks in the same process/event loop — not separate threads — so both share the same `DIContainer` singletons, and uvicorn's signal-based graceful shutdown works correctly (it only installs signal handlers on the main thread). Shutdown is coordinated: either transport stopping (STDIO hitting EOF, or HTTP receiving a termination signal) cleanly stops the other.
+
+Example:
+```python
+server = ServerConfig(name="my-server", transport_type="http", max_sessions=100, session_timeout_ms=1_800_000)
+```
 
 ---
 
@@ -184,6 +209,7 @@ To run the automated test suite, execute:
 python tests/test_basic.py
 python tests/test_tasks.py
 python tests/test_initial_tool.py
+python tests/test_transports.py
 ```
 
 ### Testing Harness
