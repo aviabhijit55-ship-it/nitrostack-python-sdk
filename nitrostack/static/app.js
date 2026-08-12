@@ -412,17 +412,30 @@ function generateFormFromSchema(schema) {
   // We resolve the Pydantic properties schema
   if (!schema) return;
   
-  const defs = schema.$defs || {};
+  const defs = schema.$defs || schema.definitions || {};
   let properties = {};
   let required = [];
   
-  // Pydantic wraps fields under properties.input referencing definition model
-  if (schema.properties && schema.properties.input && schema.properties.input.$ref) {
-    const refPath = schema.properties.input.$ref.split('/').pop();
-    const model = defs[refPath] || {};
-    properties = model.properties || {};
-    required = model.required || [];
-  } else if (schema.properties) {
+  // NitroStack tools wrap the real Pydantic model under `properties.input`.
+  // That may be a `$ref` into `$defs` (preferred) or an inlined object schema.
+  // Either way, expand the nested model so Studio shows real fields (a, b, ...)
+  // instead of a single "input" JSON blob.
+  if (schema.properties && schema.properties.input) {
+    const inputProp = schema.properties.input;
+    let model = null;
+    if (inputProp.$ref) {
+      const refPath = inputProp.$ref.split('/').pop();
+      model = defs[refPath] || {};
+    } else if (inputProp.properties) {
+      model = inputProp;
+    }
+    if (model) {
+      properties = model.properties || {};
+      required = model.required || [];
+    }
+  }
+
+  if (!Object.keys(properties).length && schema.properties) {
     properties = schema.properties || {};
     required = schema.required || [];
   }
