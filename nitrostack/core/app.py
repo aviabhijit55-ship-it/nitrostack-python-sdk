@@ -7,7 +7,7 @@ import asyncio
 import inspect
 import datetime
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Pattern, Set, Tuple, Type
+from typing import Any, Callable, Dict, List, Literal, Optional, Pattern, Set, Tuple, Type
 
 import mcp.types as types
 from mcp.server.lowlevel.server import request_ctx
@@ -36,7 +36,14 @@ from nitrostack.events.event_emitter import EventEmitter
 class ServerConfig:
     name: str
     version: str = "1.0.0"
-    transport_type: Optional[str] = None
+    transport_type: Optional[Literal["stdio", "http", "dual"]] = None
+    # Streamable HTTP options (Phase 3). Each can also be set via env var at
+    # `start()` time (`MCP_STATELESS`, `MCP_MAX_SESSIONS`, `MCP_SESSION_TIMEOUT_MS`);
+    # the env var wins if both are set, matching the existing `transport_type`/
+    # `MCP_TRANSPORT_TYPE` precedence below.
+    stateless: bool = False
+    max_sessions: Optional[int] = None
+    session_timeout_ms: Optional[int] = None
 
 
 def mcp_app(module: Type, server: ServerConfig):
@@ -470,9 +477,15 @@ class McpApplication:
         # `experimental.task_metadata` field (populated by the low-level server
         # from `req.params.task`) rather than reaching into private state.
         task_metadata = None
+        session = None
+        progress_token = None
         rc = request_ctx.get(None)
-        if rc is not None and getattr(rc, "experimental", None) is not None:
-            task_metadata = rc.experimental.task_metadata
+        if rc is not None:
+            if getattr(rc, "experimental", None) is not None:
+                task_metadata = rc.experimental.task_metadata
+            if getattr(rc, "meta", None) is not None:
+                progress_token = rc.meta.progressToken
+            session = getattr(rc, "session", None)
 
         is_task = (task_metadata is not None) or (cfg.task_support == "required")
         if cfg.task_support == "forbidden":
@@ -489,7 +502,12 @@ class McpApplication:
                     tool_name=cfg.name,
                     metadata={"input": input_instance},
                 )
-                task_ctx.task = TaskContext(task_id, self.task_manager)
+                task_ctx.task = TaskContext(
+                    task_id,
+                    self.task_manager,
+                    session=session,
+                    progress_token=progress_token,
+                )
                 try:
                     result = await run_pipeline(
                         handler=entry.method,
@@ -769,52 +787,52 @@ class McpApplication:
     # Transports
     # ------------------------------------------------------------------
 
-    def get_combined_app(self) -> Any:
+    def get_combined_app(
+        self,
+        *,
+        max_sessions: Optional[int] = None,
+        session_idle_timeout: Optional[float] = None,
+        enable_cors: bool = True,
+        stateless: Optional[bool] = None,
+    ) -> Any:
         """
-        Minimal Starlette app wiring the owned low-level server directly to both the
-        modern Streamable HTTP transport (`/mcp`) and the legacy SSE transport
-        (`/sse` + `/mcp/messages`). Full session lifecycle management, auth
-        middleware, and dual-mode orchestration are Phase 3's job — this is the
-        foundation it extends.
+        Build the Starlette app wiring the owned low-level server to the Streamable
+        HTTP (`/mcp`), legacy SSE (`/sse` + `/mcp/messages/`), and health-check
+        (`/mcp/health`) endpoints. See `nitrostack.transports.http.build_http_app`
+        for the full behavior (session cap, CORS, DNS-rebinding protection).
+
+        Any argument left as `None` falls back to this app's `ServerConfig`.
         """
-        import contextlib
-        from starlette.applications import Starlette
-        from starlette.routing import Mount, Route
-        from starlette.responses import Response
-        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-        from mcp.server.sse import SseServerTransport
+        from nitrostack.transports.http import build_http_app
 
-        session_manager = StreamableHTTPSessionManager(app=self.mcp_server, stateless=False)
-        sse_transport = SseServerTransport("/mcp/messages")
-
-        async def handle_streamable_http(scope, receive, send) -> None:
-            await session_manager.handle_request(scope, receive, send)
-
-        async def handle_sse(request):
-            async with sse_transport.connect_sse(request.scope, request.receive, request._send) as streams:
-                await self.mcp_server.run(streams[0], streams[1], self.mcp_server.create_initialization_options())
-            return Response()
-
-        @contextlib.asynccontextmanager
-        async def lifespan(app):
-            async with session_manager.run():
-                yield
-
-        return Starlette(
-            routes=[
-                # `handle_streamable_http` and `handle_post_message` are raw ASGI apps
-                # (scope, receive, send), so they must be `Mount`ed rather than used as
-                # `Route` endpoints (which expect a `Request -> Response` function).
-                Mount("/mcp", app=handle_streamable_http),
-                Route("/sse", endpoint=handle_sse, methods=["GET"]),
-                Mount("/mcp/messages", app=sse_transport.handle_post_message),
-            ],
-            lifespan=lifespan,
+        return build_http_app(
+            self,
+            max_sessions=max_sessions if max_sessions is not None else self.server_config.max_sessions,
+            session_idle_timeout=session_idle_timeout,
+            enable_cors=enable_cors,
+            stateless=self.server_config.stateless if stateless is None else stateless,
         )
 
     async def _run_stdio(self) -> None:
         async with stdio_server() as (read_stream, write_stream):
             await self.mcp_server.run(read_stream, write_stream, self.mcp_server.create_initialization_options())
+
+    @staticmethod
+    def _env_int(name: str) -> Optional[int]:
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _env_bool(name: str) -> Optional[bool]:
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            return None
+        return raw.strip().lower() in ("1", "true", "yes", "on")
 
     async def start(self) -> None:
         """Starts the MCP application based on transport configurations."""
@@ -826,38 +844,49 @@ class McpApplication:
         except Exception:
             pass
 
-        transport = os.environ.get("MCP_TRANSPORT_TYPE") or getattr(self.server_config, "transport_type", None)
+        transport = os.environ.get("MCP_TRANSPORT_TYPE") or self.server_config.transport_type
         node_env = os.environ.get("NODE_ENV", "development")
         port = int(os.environ.get("PORT") or os.environ.get("MCP_SERVER_PORT") or 8000)
 
+        stateless = self._env_bool("MCP_STATELESS")
+        if stateless is None:
+            stateless = self.server_config.stateless
+        max_sessions = self._env_int("MCP_MAX_SESSIONS") or self.server_config.max_sessions
+        session_timeout_ms = self._env_int("MCP_SESSION_TIMEOUT_MS") or self.server_config.session_timeout_ms
+        session_idle_timeout = (session_timeout_ms / 1000) if session_timeout_ms else None
+        graceful_timeout_ms = self._env_int("MCP_GRACEFUL_SHUTDOWN_TIMEOUT_MS") or 10000
+
         if transport == "http":
-            # Run combined HTTP Server
             import uvicorn
-            app = self.get_combined_app()
-            config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+            app = self.get_combined_app(
+                max_sessions=max_sessions,
+                session_idle_timeout=session_idle_timeout,
+                stateless=stateless,
+            )
+            config = uvicorn.Config(
+                app,
+                host="0.0.0.0",
+                port=port,
+                log_level="info",
+                timeout_graceful_shutdown=graceful_timeout_ms / 1000,
+            )
             server = uvicorn.Server(config)
             await server.serve()
         elif transport == "dual" or (node_env == "production" and not transport):
-            # dual mode: stdio + HTTP
-            import threading
+            from nitrostack.transports.dual import run_dual
 
-            def run_http():
-                import asyncio as _asyncio
-                import uvicorn
-                loop = _asyncio.new_event_loop()
-                _asyncio.set_event_loop(loop)
-                app = self.get_combined_app()
-                config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
-                server = uvicorn.Server(config)
-                loop.run_until_complete(server.serve())
-
-            http_thread = threading.Thread(target=run_http, daemon=True)
-            http_thread.start()
-
-            # Run stdio in the main thread
-            from nitrostack.transports.stdio import safe_stdio_transport
-            with safe_stdio_transport():
-                await self._run_stdio()
+            app = self.get_combined_app(
+                max_sessions=max_sessions,
+                session_idle_timeout=session_idle_timeout,
+                stateless=stateless,
+            )
+            await run_dual(
+                self,
+                app,
+                host="0.0.0.0",
+                port=port,
+                graceful_timeout=graceful_timeout_ms / 1000,
+            )
         else:
             # Default Stdio
             from nitrostack.transports.stdio import safe_stdio_transport

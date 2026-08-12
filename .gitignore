@@ -56,6 +56,7 @@ Thumbs.db
 # Local scaffold / scratch projects (not part of the SDK)
 adv-proj/
 new-mcp-server/
+mcp-app/
 
 # Node widgets (if installed locally in examples/templates)
 node_modules/

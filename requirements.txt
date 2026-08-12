@@ -3,3 +3,4 @@ pydantic>=2.0.0
 starlette>=0.30.0
 uvicorn>=0.20.0
 watchfiles>=0.18.0
+anyio>=4.0.0

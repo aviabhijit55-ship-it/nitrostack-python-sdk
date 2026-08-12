@@ -92,23 +92,60 @@ class TaskContext:
 
     Public methods (``update_progress``, ``cancel``, ``throw_if_cancelled``) are
     preserved for tool authors. Internally this wraps a ``TaskManager`` instance.
+
+    ``session`` / ``progress_token`` are optional and, when both are present, let
+    ``update_progress()`` push a live ``notifications/progress`` message over
+    whichever transport (STDIO or Streamable HTTP) initiated the task —
+    transport-agnostic since both use the same ``mcp.server.session.ServerSession``.
+    The client only receives these if it supplied a ``progressToken`` in the
+    original ``tools/call`` request's ``_meta``; ``TaskManager``-backed polling via
+    ``tasks/get`` always works regardless, so this is additive, not required.
     """
 
-    def __init__(self, task_id: str, task_manager: Any = None):
+    def __init__(
+        self,
+        task_id: str,
+        task_manager: Any = None,
+        *,
+        session: Any = None,
+        progress_token: Any = None,
+    ):
         self.task_id = task_id
         self.progress_message: str = ""
         self.is_cancelled: bool = False
         self._task_manager = task_manager
+        self._session = session
+        self._progress_token = progress_token
+        self._progress_count = 0
 
     def update_progress(self, message: str) -> None:
         self.progress_message = message
         manager = self._task_manager
-        if manager is None:
+        if manager is not None:
+            try:
+                manager.update_progress(self.task_id, message)
+            except Exception:
+                # Task may already be terminal/expired — ignore for handler ergonomics.
+                pass
+        self._push_progress_notification(message)
+
+    def _push_progress_notification(self, message: str) -> None:
+        if self._session is None or self._progress_token is None:
             return
+        self._progress_count += 1
         try:
-            manager.update_progress(self.task_id, message)
+            import asyncio
+            asyncio.create_task(
+                self._session.send_progress_notification(
+                    progress_token=self._progress_token,
+                    progress=self._progress_count,
+                    message=message,
+                )
+            )
         except Exception:
-            # Task may already be terminal/expired — ignore for handler ergonomics.
+            # Best-effort: a client that didn't request progress updates, a
+            # transport that already closed, or no running event loop should
+            # never break task execution itself.
             pass
 
     def cancel(self) -> None:
