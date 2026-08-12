@@ -4,6 +4,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Protocol, List, Dict, Optional
 
+from nitrostack.core.errors import TaskCancelledError
+
 # Protocol for Logger matching TS Winstron logger equivalent (Section 13)
 class Logger(Protocol):
     def debug(self, message: str, meta: dict | None = None) -> None: ...
@@ -84,42 +86,51 @@ class AuthContext:
     claims: Dict[str, Any] = field(default_factory=dict)  # custom claims
     token_payload: Any = None        # full decoded token
 
-class TaskCancelledError(Exception):
-    """Raised when an MCP background task has been cancelled."""
-    pass
-
 class TaskContext:
-    """Context representation for long-running asynchronous MCP tasks."""
-    def __init__(self, task_id: str):
+    """
+    Context representation for long-running asynchronous MCP tasks.
+
+    Public methods (``update_progress``, ``cancel``, ``throw_if_cancelled``) are
+    preserved for tool authors. Internally this wraps a ``TaskManager`` instance.
+    """
+
+    def __init__(self, task_id: str, task_manager: Any = None):
         self.task_id = task_id
         self.progress_message: str = ""
         self.is_cancelled: bool = False
+        self._task_manager = task_manager
 
     def update_progress(self, message: str) -> None:
         self.progress_message = message
+        manager = self._task_manager
+        if manager is None:
+            return
         try:
-            from nitrostack.core.task import TaskRegistry
-            TaskRegistry.update_progress(self.task_id, message)
+            manager.update_progress(self.task_id, message)
         except Exception:
+            # Task may already be terminal/expired — ignore for handler ergonomics.
             pass
 
     def cancel(self) -> None:
         self.is_cancelled = True
+        manager = self._task_manager
+        if manager is None:
+            return
         try:
-            from nitrostack.core.task import TaskRegistry
-            TaskRegistry.cancel_task(self.task_id)
+            manager.cancel_task(self.task_id)
         except Exception:
             pass
 
     def throw_if_cancelled(self) -> None:
-        try:
-            from nitrostack.core.task import TaskRegistry
-            if TaskRegistry.is_task_cancelled(self.task_id):
-                self.is_cancelled = True
-        except Exception:
-            pass
+        manager = self._task_manager
+        if manager is not None:
+            try:
+                if manager.is_task_cancelled(self.task_id):
+                    self.is_cancelled = True
+            except Exception:
+                pass
         if self.is_cancelled:
-            raise TaskCancelledError(f"Task {self.task_id} has been cancelled.")
+            raise TaskCancelledError(self.task_id)
 
 @dataclass
 class ExecutionContext:

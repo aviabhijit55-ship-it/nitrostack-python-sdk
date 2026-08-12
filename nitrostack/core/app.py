@@ -18,11 +18,17 @@ from pydantic import BaseModel, create_model
 from nitrostack.core.context import ExecutionContext, TaskContext
 from nitrostack.core.decorators import ToolConfig, ResourceConfig, PromptConfig
 from nitrostack.core.di import DIContainer
-from nitrostack.core.errors import PromptNotFoundError, ResourceNotFoundError
+from nitrostack.core.errors import (
+    PromptNotFoundError,
+    ResourceNotFoundError,
+    TaskAlreadyTerminalError,
+    TaskExpiredError,
+    TaskNotFoundError,
+)
 from nitrostack.core.mcp_server import NitroStackMcpServer
 from nitrostack.core.pipeline import run_pipeline
 from nitrostack.core.additional_decorators import HealthCheckRegistry
-from nitrostack.core.task import TaskRegistry
+from nitrostack.core.task import TaskManager, TaskStatus
 from nitrostack.events.event_emitter import EventEmitter
 
 
@@ -125,6 +131,7 @@ class McpApplication:
         self._resource_templates: List[_ResourceEntry] = []
         self._prompts: Dict[str, _PromptEntry] = {}
         self._initial_tools: List[Tuple[Any, Callable, ToolConfig]] = []
+        self.task_manager = TaskManager()
 
         self._bootstrap()
 
@@ -472,9 +479,9 @@ class McpApplication:
             is_task = False
 
         if is_task:
-            task_id = f"task_{uuid.uuid4().hex[:12]}"
-            ttl = task_metadata.ttl if task_metadata else 300
-            TaskRegistry.create_task(task_id, ttl=ttl)
+            ttl = task_metadata.ttl if task_metadata and task_metadata.ttl is not None else 300
+            task = self.task_manager.create_task(ttl_seconds=ttl)
+            task_id = task.id
 
             async def background_execution():
                 task_ctx = ExecutionContext(
@@ -482,7 +489,7 @@ class McpApplication:
                     tool_name=cfg.name,
                     metadata={"input": input_instance},
                 )
-                task_ctx.task = TaskContext(task_id)
+                task_ctx.task = TaskContext(task_id, self.task_manager)
                 try:
                     result = await run_pipeline(
                         handler=entry.method,
@@ -498,23 +505,18 @@ class McpApplication:
                         param_name="input",
                         param_type=entry.input_model,
                     )
-                    TaskRegistry.complete_task(task_id, self._to_call_tool_result(result))
+                    self.task_manager.complete_task(
+                        task_id, self._to_call_tool_result(result)
+                    )
                 except Exception as e:
-                    TaskRegistry.fail_task(task_id, e)
+                    try:
+                        self.task_manager.fail_task(task_id, e)
+                    except (TaskAlreadyTerminalError, TaskExpiredError):
+                        # Cancelled/expired while running — leave terminal state as-is.
+                        pass
 
             asyncio.create_task(background_execution())
-            now = datetime.datetime.now(datetime.timezone.utc)
-            return types.CreateTaskResult(
-                task=types.Task(
-                    taskId=task_id,
-                    status="working",
-                    statusMessage="Task started",
-                    createdAt=now,
-                    lastUpdatedAt=now,
-                    ttl=ttl,
-                    pollInterval=5,
-                )
-            )
+            return types.CreateTaskResult(task=self._task_data_to_mcp_task(task))
 
         ctx = ExecutionContext(request_id=str(uuid.uuid4()), tool_name=cfg.name, metadata={"input": input_instance})
         result = await run_pipeline(
@@ -620,78 +622,105 @@ class McpApplication:
     # `request_handlers`/`notification_handlers` dicts (no FastMCP reach-through).
     # ------------------------------------------------------------------
 
+    def _task_data_to_mcp_task(self, task) -> types.Task:
+        """Map TaskData to MCP Task. EXPIRED is not an MCP wire status — surface as error."""
+        if task.status == TaskStatus.EXPIRED:
+            raise types.McpError(
+                types.ErrorData(
+                    code=types.INVALID_PARAMS,
+                    message=f"Task {task.id} has expired",
+                )
+            )
+        return types.Task(
+            taskId=task.id,
+            status=task.status.value,
+            statusMessage=task.progress or "",
+            createdAt=task.created_at,
+            lastUpdatedAt=task.last_updated_at or task.created_at,
+            ttl=task.ttl_seconds if task.ttl_seconds is not None else 0,
+            pollInterval=task.poll_interval,
+        )
+
     def _register_task_handlers(self, server: NitroStackMcpServer) -> None:
         async def handle_list_tasks(req):
-            tasks_list = [
-                types.Task(
-                    taskId=t.task_id,
-                    status=t.status,
-                    statusMessage=t.status_message,
-                    createdAt=t.created_at,
-                    lastUpdatedAt=t.last_updated_at,
-                    ttl=t.ttl,
-                    pollInterval=t.poll_interval,
-                )
-                for t in TaskRegistry.list_tasks()
-            ]
+            tasks_list = []
+            for t in self.task_manager.list_tasks():
+                if t.status == TaskStatus.EXPIRED:
+                    continue
+                tasks_list.append(self._task_data_to_mcp_task(t))
             return types.ListTasksResult(tasks=tasks_list, nextCursor=None)
 
         async def handle_get_task(req):
             task_id = req.params.taskId
-            t = TaskRegistry.get_task(task_id)
-            if not t:
+            try:
+                t = self.task_manager.get_task(task_id)
+            except TaskNotFoundError:
                 raise types.McpError(
                     types.ErrorData(code=types.INVALID_PARAMS, message=f"Task {task_id} not found")
                 )
+            mcp_task = self._task_data_to_mcp_task(t)
             return types.GetTaskResult(
-                taskId=t.task_id,
-                status=t.status,
-                statusMessage=t.status_message,
-                createdAt=t.created_at,
-                lastUpdatedAt=t.last_updated_at,
-                ttl=t.ttl,
-                pollInterval=t.poll_interval,
+                taskId=mcp_task.taskId,
+                status=mcp_task.status,
+                statusMessage=mcp_task.statusMessage,
+                createdAt=mcp_task.createdAt,
+                lastUpdatedAt=mcp_task.lastUpdatedAt,
+                ttl=mcp_task.ttl,
+                pollInterval=mcp_task.pollInterval,
             )
 
         async def handle_cancel_task(req):
             task_id = req.params.taskId
-            t = TaskRegistry.get_task(task_id)
-            if not t:
+            try:
+                self.task_manager.cancel_task(task_id)
+                t = self.task_manager.get_task(task_id)
+            except TaskNotFoundError:
                 raise types.McpError(
                     types.ErrorData(code=types.INVALID_PARAMS, message=f"Task {task_id} not found")
                 )
-            TaskRegistry.cancel_task(task_id)
-            t = TaskRegistry.get_task(task_id)
+            except TaskExpiredError:
+                raise types.McpError(
+                    types.ErrorData(code=types.INVALID_PARAMS, message=f"Task {task_id} has expired")
+                )
+            except TaskAlreadyTerminalError as e:
+                raise types.McpError(
+                    types.ErrorData(code=types.INVALID_PARAMS, message=str(e))
+                )
+            mcp_task = self._task_data_to_mcp_task(t)
             return types.CancelTaskResult(
-                taskId=t.task_id,
-                status=t.status,
-                statusMessage=t.status_message,
-                createdAt=t.created_at,
-                lastUpdatedAt=t.last_updated_at,
-                ttl=t.ttl,
-                pollInterval=t.poll_interval,
+                taskId=mcp_task.taskId,
+                status=mcp_task.status,
+                statusMessage=mcp_task.statusMessage,
+                createdAt=mcp_task.createdAt,
+                lastUpdatedAt=mcp_task.lastUpdatedAt,
+                ttl=mcp_task.ttl,
+                pollInterval=mcp_task.pollInterval,
             )
 
         async def handle_get_task_payload(req):
             task_id = req.params.taskId
-            t = TaskRegistry.get_task(task_id)
-            if not t:
+            try:
+                t = await self.task_manager.wait_until_done(task_id)
+            except TaskNotFoundError:
                 raise types.McpError(
                     types.ErrorData(code=types.INVALID_PARAMS, message=f"Task {task_id} not found")
                 )
-            await t.done_event.wait()
-            if t.status == "completed":
+            if t.status == TaskStatus.COMPLETED:
                 return t.result
-            elif t.status == "cancelled":
+            if t.status == TaskStatus.CANCELLED:
                 return types.CallToolResult(
                     content=[types.TextContent(type="text", text="Task was cancelled.")],
                     isError=True,
                 )
-            else:
+            if t.status == TaskStatus.EXPIRED:
                 return types.CallToolResult(
-                    content=[types.TextContent(type="text", text=str(t.error or t.status_message))],
+                    content=[types.TextContent(type="text", text="Task has expired.")],
                     isError=True,
                 )
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str(t.error or t.progress))],
+                isError=True,
+            )
 
         server.request_handlers[types.ListTasksRequest] = handle_list_tasks
         server.request_handlers[types.GetTaskRequest] = handle_get_task
