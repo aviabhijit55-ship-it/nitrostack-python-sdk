@@ -19,13 +19,12 @@ dependencies = [
 
 [project.scripts]
 nitrostack-py = "nitrostack.cli.main:main"
-nitrostack-studio = "nitrostack.studio:start_server_cli"
 
 [tool.setuptools.packages.find]
 include = ["nitrostack*"]
 
 [tool.setuptools.package-data]
-nitrostack = ["static/*", "templates/**/*"]
+nitrostack = ["templates/**/*"]
 
 [tool.ruff]
 line-length = 100
