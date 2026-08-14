@@ -34,35 +34,35 @@ pip install -e .
 You can quickly scaffold a new project template using the interactive CLI tool:
 
 ```bash
-nitrostack-py init my-server
+nitrostack-py init
 ```
 
-*(Or via Python: `python -m nitrostack.cli.main init my-server`)*
+*(Or via Python: `python -m nitrostack.cli.main init`)*
+
+The project name is optional on the command line. If omitted, the CLI asks for it next:
+
+```bash
+nitrostack-py init my-server --template python-starter
+```
 
 This launches an interactive prompt where you can:
-1. **Choose a template**:
-   - **Starter**: A simple calculator server.
-   - **Advanced**: A food delivery server with items and order status tracking.
-   - **OAuth**: A flight booking server demonstrating OAuth 2.1 authentication and guarded routes.
-2. **Provide metadata**: Specify a custom description and author name.
+1. **Project name** (if not passed as an argument). Default: `my-mcp-server`.
+2. **Choose a template** by explicit name:
+   - **python-starter**: A simple calculator server.
+   - **python-pizzaz**: A pizza shop finder with maps and widgets.
+   - **python-oauth**: A flight booking server demonstrating OAuth 2.1 authentication and guarded routes.
+3. **Provide metadata**: Specify a custom description and author name.
+4. **Install dependencies**: `Install dependencies: (Y/n)` — Enter or `Y` runs `npm install` in `src/widgets`; `n` skips it. `--skip-install` skips the prompt.
+
+Optional port flags override the defaults (**3000** MCP, **3001** widgets):
+
+```bash
+nitrostack-py init my-server --template python-starter --port 4000 --widget 4001
+nitrostack-py dev --port 4000 --widget 4001
+nitrostack-py start --port 4000 --widget 4001
+```
 
 Once scaffolded, follow the next steps printed by the CLI to run your server, configure environment variables, and try it out.
-
----
-
-## NitroStudio Dashboard
-
-NitroStudio is an interactive visual developer dashboard for inspecting, graphing, and testing your MCP servers.
-
-To launch the dashboard, execute:
-```bash
-nitrostack-studio
-```
-If your Python scripts directory is not configured in your system `PATH`, you can run it via Python:
-```bash
-python -m nitrostack.studio
-```
-This launches the interface in your default web browser, allowing you to traverse directories, visualize your dependency graph, test tool execution forms, chat with a local mock LLM, and inspect RPC logs.
 
 ---
 
@@ -158,7 +158,8 @@ The SDK reads standard settings from the environment or `.env` files:
 
 | Environment Variable | Description |
 |---|---|
-| `PORT` / `MCP_SERVER_PORT` | The port to bind for HTTP/SSE transport (default: `8000`). |
+| `PORT` / `MCP_SERVER_PORT` | The port to bind for HTTP/SSE transport (default: `3000`). Overridden by `nitrostack-py --port`. |
+| `WIDGETS_DEV_PORT` | Widget Next.js port (default: `3001`). Overridden by `nitrostack-py --widget`. |
 | `MCP_TRANSPORT_TYPE` | Transport selection: `stdio`, `http`, or `dual` (combining stdio + HTTP/SSE). |
 | `NODE_ENV` | If set to `production`, defaults to `dual` transport. Otherwise defaults to `stdio`. |
 | `MCP_MAX_SESSIONS` | Cap on concurrent Streamable HTTP sessions; new sessions beyond the cap get an HTTP `429`. Unset = unlimited. |
@@ -178,7 +179,7 @@ NitroStack apps can run over three transports, selected via `MCP_TRANSPORT_TYPE`
 
 - **`stdio`** (default outside production): JSON-RPC over stdin/stdout — the standard mode for desktop MCP clients (Claude Desktop, Cursor, etc.).
 - **`http`**: Streamable HTTP + legacy SSE over a real network port, for cloud/remote deployments. Exposes:
-  - `POST/GET/DELETE /mcp` — Streamable HTTP (session-based JSON-RPC + SSE streaming)
+  - `POST/GET/DELETE /mcp` — Streamable HTTP (session-based JSON-RPC + SSE streaming). `/mcp` and `/mcp/` are equivalent; the server does not 307 between them (MCP Inspector needs the no-slash URL for its SSE GET).
   - `GET /sse` + `POST /mcp/messages/` — legacy HTTP+SSE for older clients (trailing slash required so messages aren't swallowed by the Streamable HTTP `/mcp` mount)
   - `GET /mcp/health` — health check (`status`, active session count, uptime)
   - Per-session isolation, idle-session timeouts, and DNS-rebinding protection are provided by the underlying `mcp` SDK's `StreamableHTTPSessionManager`; NitroStack adds CORS, a concurrent-session cap, and the health endpoint on top.
