@@ -26,8 +26,8 @@ from nitrostack.core.di import DIContainer
 from nitrostack.core.app import McpApplicationFactory, ServerConfig, mcp_app
 from nitrostack.testing import NitroTestingModule
 from nitrostack.transports.http import build_http_app
-from nitrostack.widgets.component import load_widget_html
-from nitrostack.widgets.html_util import get_mapbox_token
+from nitrostack.widgets.html_util import get_mapbox_token, inject_mapbox_token
+from nitrostack.widgets.component import create_component, load_widget_html
 from nitrostack.widgets.route_templates import get_builtin_route_html, render_widget_html
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,6 +55,7 @@ def test_pizzaz_html_files_exist_in_template():
             assert "mapboxgl.accessToken" in text
             assert "pk.eyJ" not in text
             assert "data-nitro-needs-client" in text
+            assert "Set MAPBOX_TOKEN" in text
 
 
 def test_pizzaz_builtin_templates_match_disk():
@@ -243,6 +244,32 @@ def test_mapbox_token_reads_env_only():
         os.environ.pop("NEXT_PUBLIC_MAPBOX_TOKEN", None)
 
 
+def test_resources_read_bundle_injects_mapbox_token():
+    """Studio loads widgets via resources/read → get_bundle, not tools/call HTML."""
+    os.environ.pop("MAPBOX_TOKEN", None)
+    os.environ.pop("NEXT_PUBLIC_MAPBOX_TOKEN", None)
+    disk = (TEMPLATE_OUT / "pizza-map.html").read_text(encoding="utf-8")
+    assert 'window.__NITRO_MAPBOX_TOKEN = ""' in disk
+    component = create_component(id="pizza-map", name="Pizza map", html=disk)
+    assert 'window.__NITRO_MAPBOX_TOKEN = ""' in component.get_bundle()
+
+    os.environ["MAPBOX_TOKEN"] = "pk.customtoken123"
+    try:
+        bundle = component.get_bundle()
+        assert 'window.__NITRO_MAPBOX_TOKEN = "pk.customtoken123"' in bundle
+        filled = component.html_with_data(
+            {
+                "shops": [{"id": "tonys-pizza", "name": "Tony's", "coords": [-122.4, 37.7]}],
+                "filter": "all",
+                "totalShops": 1,
+            }
+        )
+        assert 'window.__NITRO_MAPBOX_TOKEN = "pk.customtoken123"' in filled
+        assert inject_mapbox_token(disk).count("pk.customtoken123") == 1
+    finally:
+        os.environ.pop("MAPBOX_TOKEN", None)
+
+
 def test_pizza_map_live_html_uses_mapbox():
     html = render_widget_html(
         "pizza-map",
@@ -279,6 +306,7 @@ if __name__ == "__main__":
     test_live_http_widget_preview_calls_tool()
     test_pizzaz_open_now_filter_excludes_closed_shops()
     test_show_pizza_map_blank_filter_returns_all_shops()
-    test_mapbox_token_matches_ts_fallback()
+    test_mapbox_token_reads_env_only()
+    test_resources_read_bundle_injects_mapbox_token()
     test_pizza_map_live_html_uses_mapbox()
     print("pizzaz widget tests passed")

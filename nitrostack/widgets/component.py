@@ -59,13 +59,15 @@ class Component:
         return f"ui://widget/{self.id}.html"
 
     def get_bundle(self) -> str:
+        from nitrostack.widgets.html_util import inject_mapbox_token
+
         css_tag = f"<style>{self.css}</style>" if self.css else ""
         js_tag = f'<script type="module">{self.js}</script>' if self.js else ""
-        return f"{self.html}\n{css_tag}\n{js_tag}".strip()
+        return inject_mapbox_token(f"{self.html}\n{css_tag}\n{js_tag}".strip())
 
     def html_with_data(self, data: Any) -> str:
         """Python-render this widget with live tool output for Inspector / preview."""
-        from nitrostack.widgets.html_util import inject_tool_data
+        from nitrostack.widgets.html_util import inject_mapbox_token, inject_tool_data
         from nitrostack.widgets.route_templates import render_widget_html
 
         rendered = render_widget_html(self.id, data)
@@ -75,7 +77,7 @@ class Component:
                 bundle_extra += f"<style>{self.css}</style>"
             if self.js:
                 bundle_extra += f'<script type="module">{self.js}</script>'
-            return f"{rendered}\n{bundle_extra}".strip()
+            return inject_mapbox_token(f"{rendered}\n{bundle_extra}".strip())
         return inject_tool_data(self.get_bundle(), data)
 
     def get_openai_resource_metadata(self) -> Dict[str, Any]:

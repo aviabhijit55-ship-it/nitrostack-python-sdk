@@ -432,6 +432,10 @@ window.__nitroWidgetRender = function(data) {
   function mountMap(attempt) {
     if (window.__nitroMapSig === sig && window.__nitroMap) return;
     if (!window.__NITRO_MAPBOX_TOKEN) {
+      if (meta) meta.textContent = "Set MAPBOX_TOKEN in .env to load the map.";
+      if (mapEl) {
+        mapEl.innerHTML = '<div class="empty" style="padding:24px;position:relative;z-index:2">Set MAPBOX_TOKEN in .env (Mapbox public pk. token) to load the map.</div>';
+      }
       return;
     }
     if (typeof mapboxgl === "undefined") {

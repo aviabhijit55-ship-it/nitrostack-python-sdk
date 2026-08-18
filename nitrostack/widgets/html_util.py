@@ -22,6 +22,26 @@ def get_mapbox_token() -> str:
     return raw
 
 
+def inject_mapbox_token(html_doc: str) -> str:
+    """Fill ``window.__NITRO_MAPBOX_TOKEN`` from env at serve time.
+
+    ``widgets/out/pizza-map.html`` is committed with an empty token so git does
+    not store a ``pk.eyJ`` secret. Studio ``resources/read`` uses that file via
+    ``get_bundle()``; without this rewrite the live map stays blank.
+    """
+    if "window.__NITRO_MAPBOX_TOKEN" not in html_doc:
+        return html_doc
+    assignment = f"window.__NITRO_MAPBOX_TOKEN = {json.dumps(get_mapbox_token())};"
+    marker = "window.__NITRO_MAPBOX_TOKEN ="
+    start = html_doc.find(marker)
+    if start < 0:
+        return html_doc
+    end = html_doc.find(";", start)
+    if end < 0:
+        return html_doc
+    return html_doc[:start] + assignment + html_doc[end + 1 :]
+
+
 def mapbox_static_url(shops: Any, width: int = 800, height: int = 520) -> str:
     """Python first-paint map (no React). Pins match filtered shops."""
     from urllib.parse import quote
