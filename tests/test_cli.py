@@ -1,10 +1,20 @@
-"""CLI init / port-reservation tests (Phase 5 DX, matching the TS CLI)."""
+"""CLI tests: init/ports (develop) plus generate/pack/upgrade/validate."""
+from __future__ import annotations
+
+import ast
+import asyncio
+import importlib.util
 import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -36,8 +46,31 @@ from nitrostack.cli.main import (
     run_start,
 )
 from nitrostack.core.app import DEFAULT_HTTP_PORT, resolve_http_port
+from nitrostack import ExecutionContext
+from nitrostack.cli._shared import parse_pyproject_dependencies
+from nitrostack.cli.generate import generate_component, generate_module as generate_module_from_template
+from nitrostack.cli.pack import (
+    _is_valid_wheel,
+    collect_pack_files,
+    pack_project,
+    requirements_from_project,
+)
+from nitrostack.cli.upgrade import (
+    UpgradeError,
+    _add_to_pyproject_dependencies,
+    replace_nitrostack_spec,
+    upgrade_project,
+)
+from nitrostack.cli.validators import (
+    _constraints_conflict,
+    _iter_python_files,
+    validate_dependencies,
+    validate_mcp_app_imports,
+    validate_project,
+)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = ROOT
 
 
 def _cli_env():
@@ -786,6 +819,517 @@ def test_official_templates_map_to_existing_dirs():
         path = os.path.join(package_dir, "templates", folder)
         assert os.path.isdir(path), f"missing template dir for {official}: {path}"
     print("Success! Explicit template names map to on-disk folders.")
+
+
+GENERATE_CASES = [
+    ("guard", "MyGuard", Path("guards") / "my_guard.py", "MyGuard"),
+    ("pipe", "Validation", Path("pipes") / "validation.py", "ValidationPipe"),
+    ("interceptor", "Transform", Path("interceptors") / "transform.py", "TransformInterceptor"),
+    ("filter", "HttpException", Path("filters") / "http_exception.py", "HttpExceptionFilter"),
+    ("service", "Email", Path("services") / "email.py", "EmailService"),
+    ("module", "payments", Path("payments_module.py"), "PaymentsModule"),
+]
+
+
+def _load_module(path: Path, module_name: str):
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _invoke_cli(args, cwd: Path) -> tuple[int, str]:
+    old_cwd = os.getcwd()
+    old_argv = sys.argv
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    try:
+        os.chdir(cwd)
+        sys.argv = ["nitrostack-py", *args]
+        try:
+            with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+                main()
+            code = 0
+        except SystemExit as exc:
+            code = int(exc.code or 0)
+    finally:
+        os.chdir(old_cwd)
+        sys.argv = old_argv
+    return code, stdout.getvalue() + stderr.getvalue()
+
+
+def test_cli_help_lists_new_commands():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, "-m", "nitrostack.cli.main", "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0
+    help_text = result.stdout
+    for command in ("init", "dev", "start", "register", "generate", "pack", "upgrade", "install", "validate"):
+        assert command in help_text, f"expected {command!r} in --help output"
+
+
+def test_generate_guard_myguard_importable(tmp_path: Path):
+    generate_component("guard", "MyGuard", cwd=str(tmp_path))
+    path = tmp_path / "guards" / "my_guard.py"
+    assert path.is_file()
+    ast.parse(path.read_text(encoding="utf-8"))
+    module = _load_module(path, "generated_my_guard")
+    instance = module.MyGuard()
+    ctx = ExecutionContext(request_id="cli-test")
+    assert asyncio.run(instance.can_activate(ctx)) is False
+
+
+@pytest.mark.parametrize("kind,name,rel_path,class_name", GENERATE_CASES)
+def test_generate_targets_valid_python(tmp_path: Path, kind: str, name: str, rel_path: Path, class_name: str):
+    if kind == "module":
+        generate_module_from_template(name, cwd=str(tmp_path))
+    else:
+        generate_component(kind, name, cwd=str(tmp_path))
+    path = tmp_path / rel_path
+    assert path.is_file(), f"expected generated file at {rel_path}"
+    source = path.read_text(encoding="utf-8")
+    ast.parse(source)
+    compile(source, str(path), "exec")
+    module = _load_module(path, f"generated_{kind}_{class_name}")
+    cls = getattr(module, class_name)
+    instance = cls()
+    assert instance is not None
+
+
+def _mini_project(tmp_path: Path) -> Path:
+    (tmp_path / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "app_module.py").write_text("NAME = 'demo'\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("nitrostack\n", encoding="utf-8")
+    (tmp_path / ".env.example").write_text("PORT=8000\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=should-never-pack\n", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("keep me\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_pack_dry_run_lists_files_without_writing(tmp_path: Path):
+    project = _mini_project(tmp_path)
+    result = pack_project(str(project), dry_run=True)
+    assert result["dry_run"] is True
+    files = result["files"]
+    assert "main.py" in files
+    assert "app_module.py" in files
+    assert "requirements.txt" in files
+    assert ".env.example" in files
+    assert ".env" not in files
+    assert not list(project.rglob("*.whl"))
+    assert not (project / "dist").exists()
+
+
+def test_pack_creates_valid_wheel(tmp_path: Path):
+    project = _mini_project(tmp_path)
+    result = pack_project(str(project), dry_run=False)
+    wheel = Path(result["wheel"])
+    assert wheel.is_file()
+    assert wheel.suffix == ".whl"
+    assert zipfile.is_zipfile(wheel)
+    assert _is_valid_wheel(str(wheel))
+
+    with zipfile.ZipFile(wheel) as zf:
+        names = zf.namelist()
+        assert any(n.endswith(".dist-info/WHEEL") for n in names)
+        assert any(n.endswith(".dist-info/METADATA") for n in names)
+        assert any(n.endswith(".dist-info/RECORD") for n in names)
+        wheel_entry = next(n for n in names if n.endswith(".dist-info/WHEEL"))
+        wheel_body = zf.read(wheel_entry).decode("utf-8")
+        assert "Wheel-Version:" in wheel_body
+        assert any(n == ".env.example" or n.endswith("/.env.example") for n in names)
+        assert not any(n == ".env" or n.endswith("/.env") for n in names)
+        assert "SECRET=should-never-pack" not in "\n".join(
+            zf.read(n).decode("utf-8", errors="ignore") for n in names if not n.endswith("/")
+        )
+
+
+def test_upgrade_dry_run_does_not_modify_pyproject(tmp_path: Path):
+    original = (
+        "[project]\n"
+        'name = "demo"\n'
+        'version = "0.1.0"\n'
+        "dependencies = [\n"
+        '    "nitrostack>=0.1.0",\n'
+        "]\n"
+    )
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(original, encoding="utf-8")
+    with patch("nitrostack.cli.upgrade.fetch_latest_nitrostack_version", return_value="9.9.9"):
+        result = upgrade_project(str(tmp_path), dry_run=True, verify=False)
+    assert result["dry_run"] is True
+    assert result["version"] == "9.9.9"
+    assert pyproject.read_text(encoding="utf-8") == original
+    assert any(change["to"] == "nitrostack>=9.9.9" for change in result["changes"])
+
+
+def test_validate_catches_broken_imports_and_module_refs(tmp_path: Path):
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "broken-demo"\n'
+        'version = "0.1.0"\n'
+        "dependencies = [\n"
+        '    "nitrostack==1.0.0",\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "requirements.txt").write_text("nitrostack==2.0.0\n", encoding="utf-8")
+    (tmp_path / "broken_app.py").write_text(
+        "from nitrostack import mcp_app, module, ServerConfig\n"
+        "from definitely_missing_nitrostack_pkg import Missing\n\n"
+        "@module(name='root')\n"
+        "class RootModule:\n"
+        "    pass\n\n"
+        "@mcp_app(module=RootModule, server=ServerConfig(name='broken'))\n"
+        "class App:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "bad_module.py").write_text(
+        "from nitrostack import module\n\n"
+        "@module(name='bad', imports=['CalculatorModule'], exports=['Nope'], controllers=[123])\n"
+        "class BadModule:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    issues = validate_project(str(tmp_path))
+    messages = "\n".join(issue.format() for issue in issues)
+    assert any(issue.severity == "error" for issue in issues)
+    assert "conflicting version" in messages.lower() or "Conflicting version" in messages
+    assert "definitely_missing_nitrostack_pkg" in messages
+    assert "not a class" in messages.lower() or "not a class" in messages
+    assert "→" in messages or "Fix the import" in messages
+
+
+def test_validate_accepts_module_only_bootstrap(tmp_path: Path):
+    """Init templates use @module + McpApplicationFactory.create — no @mcp_app."""
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "module-only"\n'
+        'version = "0.1.0"\n'
+        "dependencies = [\n"
+        '    "nitrostack>=0.1.0",\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app_module.py").write_text(
+        "from nitrostack import module\n\n"
+        "@module(name='app')\n"
+        "class AppModule:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        "import asyncio\n"
+        "from nitrostack import McpApplicationFactory\n"
+        "from app_module import AppModule\n\n"
+        "async def main():\n"
+        "    app = await McpApplicationFactory.create(AppModule)\n"
+        "    await app.start()\n\n"
+        "if __name__ == '__main__':\n"
+        "    asyncio.run(main())\n",
+        encoding="utf-8",
+    )
+
+    issues = validate_mcp_app_imports(str(tmp_path))
+    assert not any("No @mcp_app" in issue.message for issue in issues)
+    assert not any(issue.severity == "warning" for issue in issues)
+
+    orphan = tmp_path / "orphan-module"
+    orphan.mkdir()
+    (orphan / "app_module.py").write_text(
+        "from nitrostack import module\n\n"
+        "@module(name='app')\n"
+        "class AppModule:\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    (orphan / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    orphan_issues = validate_mcp_app_imports(str(orphan))
+    assert any("No @mcp_app- or @module-decorated" in issue.message for issue in orphan_issues)
+
+    empty = tmp_path / "empty-project"
+    empty.mkdir()
+    (empty / "plain.py").write_text("VALUE = 1\n", encoding="utf-8")
+    empty_issues = validate_mcp_app_imports(str(empty))
+    assert any("No @mcp_app- or @module-decorated" in issue.message for issue in empty_issues)
+
+
+def test_generate_guard_via_cli(tmp_path: Path):
+    code, output = _invoke_cli(["generate", "guard", "TestGuard"], tmp_path)
+    assert code == 0
+    assert (tmp_path / "guards" / "test_guard.py").is_file()
+    assert "Generated guard" in output
+
+
+def _toml_loads(text: str) -> dict:
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
+    return tomllib.loads(text)
+
+
+def test_upgrade_preserves_extras_brackets(tmp_path: Path):
+    text = (
+        '[project]\n'
+        'name = "x"\n'
+        "dependencies = [\n"
+        '    "uvicorn[standard]>=0.20",\n'
+        '    "starlette>=0.30",\n'
+        "]\n"
+    )
+    updated = _add_to_pyproject_dependencies(text, "nitrostack>=1.0.0")
+    parsed = _toml_loads(updated)
+    assert "uvicorn[standard]>=0.20" in parsed["project"]["dependencies"]
+    assert "starlette>=0.30" in parsed["project"]["dependencies"]
+    assert "nitrostack>=1.0.0" in parsed["project"]["dependencies"]
+    assert 'uvicorn[standard]>=0.20' in updated
+    assert 'starlette>=0.30' in updated
+
+    inline = 'dependencies = ["a[x,y]>=1", "b"]\n'
+    inline_updated = _add_to_pyproject_dependencies("[project]\nname = \"x\"\n" + inline, "nitrostack>=1.0.0")
+    inline_parsed = _toml_loads(inline_updated)
+    assert "a[x,y]>=1" in inline_parsed["project"]["dependencies"]
+    assert "b" in inline_parsed["project"]["dependencies"]
+
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(text, encoding="utf-8")
+    with patch("nitrostack.cli.upgrade.verify_nitrostack_version"):
+        upgrade_project(str(tmp_path), version="1.0.0", verify=False, allow_downgrade=True)
+    written = pyproject.read_text(encoding="utf-8")
+    parsed_file = _toml_loads(written)
+    assert "uvicorn[standard]>=0.20" in parsed_file["project"]["dependencies"]
+    assert "starlette>=0.30" in parsed_file["project"]["dependencies"]
+    assert "nitrostack==1.0.0" in parsed_file["project"]["dependencies"]
+
+
+def test_upgrade_does_not_rewrite_sibling_packages():
+    text = "nitrostack>=0.3.0\nnitrostack-studio==1.0.0\nnitrostack_extras>=2\nnitrostack.contrib==1\n"
+    updated, count = replace_nitrostack_spec(text, "nitrostack>=9.9.9")
+    assert count == 1
+    assert "nitrostack>=9.9.9" in updated
+    assert "nitrostack-studio==1.0.0" in updated
+    assert "nitrostack_extras>=2" in updated
+    assert "nitrostack.contrib==1" in updated
+    from nitrostack.cli.upgrade import find_current_spec
+    assert find_current_spec(text) == "nitrostack>=0.3.0"
+
+
+def test_upgrade_write_failure_leaves_original(tmp_path: Path):
+    original = (
+        "[project]\n"
+        'name = "demo"\n'
+        "dependencies = [\n"
+        '    "nitrostack>=0.3.0",\n'
+        "]\n"
+    )
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(original, encoding="utf-8")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    with patch("nitrostack.cli.upgrade.verify_nitrostack_version"), patch(
+        "nitrostack.cli.upgrade._commit_file_changes", side_effect=boom
+    ):
+        with pytest.raises(OSError, match="disk full"):
+            upgrade_project(str(tmp_path), version="1.2.3", verify=False)
+    assert pyproject.read_text(encoding="utf-8") == original
+
+
+def test_upgrade_rolls_back_earlier_file_on_later_failure(tmp_path: Path):
+    from nitrostack.cli.upgrade import write_text_atomic as real_atomic
+
+    py_original = (
+        "[project]\n"
+        'name = "demo"\n'
+        "dependencies = [\n"
+        '    "nitrostack>=0.3.0",\n'
+        "]\n"
+    )
+    req_original = "nitrostack>=0.3.0\n"
+    pyproject = tmp_path / "pyproject.toml"
+    requirements = tmp_path / "requirements.txt"
+    pyproject.write_text(py_original, encoding="utf-8")
+    requirements.write_text(req_original, encoding="utf-8")
+
+    calls = {"n": 0}
+
+    def flaky_atomic(path, content):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("second write failed")
+        return real_atomic(path, content)
+
+    with patch("nitrostack.cli.upgrade.verify_nitrostack_version"), patch(
+        "nitrostack.cli.upgrade.write_text_atomic", side_effect=flaky_atomic
+    ):
+        with pytest.raises(OSError, match="second write failed"):
+            upgrade_project(str(tmp_path), version="1.2.3", verify=False)
+
+    assert pyproject.read_text(encoding="utf-8") == py_original
+    assert requirements.read_text(encoding="utf-8") == req_original
+
+
+def test_generate_module_rejects_path_traversal(tmp_path: Path):
+    outside = tmp_path.parent
+    for name in ("../../escaped", "/tmp/evil", ".."):
+        code, output = _invoke_cli(["generate", "module", name], tmp_path)
+        assert code != 0, name
+        assert "Error:" in output
+        assert not (outside / "escaped_module.py").exists()
+        assert not list(tmp_path.glob("*evil*"))
+        assert not (tmp_path / ".._module.py").exists()
+
+
+def test_upgrade_version_pins_and_blocks_downgrade(tmp_path: Path):
+    original = (
+        "[project]\n"
+        'name = "demo"\n'
+        "dependencies = [\n"
+        '    "nitrostack>=2.0.0",\n'
+        "]\n"
+    )
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(original, encoding="utf-8")
+
+    with patch("nitrostack.cli.upgrade.verify_nitrostack_version"):
+        result = upgrade_project(str(tmp_path), version="2.1.0", dry_run=True, verify=False)
+    assert result["spec"] == "nitrostack==2.1.0"
+    assert any(change["to"] == "nitrostack==2.1.0" for change in result["changes"])
+    assert pyproject.read_text(encoding="utf-8") == original
+
+    with patch("nitrostack.cli.upgrade.verify_nitrostack_version"):
+        with pytest.raises(UpgradeError, match="allow-downgrade"):
+            upgrade_project(str(tmp_path), version="0.1.0", verify=False)
+    assert pyproject.read_text(encoding="utf-8") == original
+
+    with patch("nitrostack.cli.upgrade.verify_nitrostack_version"):
+        upgrade_project(str(tmp_path), version="0.1.0", verify=False, allow_downgrade=True)
+    assert "nitrostack==0.1.0" in pyproject.read_text(encoding="utf-8")
+
+
+def test_validate_pep440_version_conflicts(tmp_path: Path):
+    from packaging.version import Version
+
+    assert Version("2.0.0rc1") < Version("2.0.0")
+    assert Version("2.0.post1") > Version("2.0")
+    assert Version("1.0+cpu").base_version == Version("1.0").base_version
+    assert Version("2.0.0") == Version("2.0.0")
+
+    assert _constraints_conflict("==2.0.0rc1", ">=2.0.0rc1") is False
+    assert _constraints_conflict("==1.0", ">=2.0") is True
+    assert _constraints_conflict("==1.0+cpu", "==1.0") is False
+
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = \"demo\"\ndependencies = [\"nitrostack==2.0.0rc1\"]\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "requirements.txt").write_text("nitrostack>=2.0.0rc1\n", encoding="utf-8")
+    issues = validate_dependencies(str(tmp_path))
+    assert not any("Conflicting version" in issue.message for issue in issues)
+
+    (tmp_path / "requirements.txt").write_text("nitrostack>=2.0\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = \"demo\"\ndependencies = [\"nitrostack==1.0\"]\n",
+        encoding="utf-8",
+    )
+    issues = validate_dependencies(str(tmp_path))
+    assert any("Conflicting version" in issue.message for issue in issues)
+
+
+def test_pack_setuptools_failure_warns(tmp_path: Path, capsys):
+    project = _mini_project(tmp_path)
+    cwd_before = os.getcwd()
+    with patch(
+        "nitrostack.cli.pack._setuptools_build_wheel",
+        side_effect=RuntimeError("malformed metadata"),
+    ):
+        result = pack_project(str(project), dry_run=False)
+    captured = capsys.readouterr().out
+    assert "Warning: setuptools build failed, falling back:" in captured
+    assert "malformed metadata" in captured
+    assert os.getcwd() == cwd_before
+    assert Path(result["wheel"]).is_file()
+
+
+def test_pack_setuptools_import_error_warns(tmp_path: Path, capsys):
+    project = _mini_project(tmp_path)
+    with patch(
+        "nitrostack.cli.pack._setuptools_build_wheel",
+        side_effect=ImportError("No module named 'setuptools.build_meta'"),
+    ):
+        result = pack_project(str(project), dry_run=False)
+    captured = capsys.readouterr().out
+    assert "Warning: setuptools build backend unavailable, falling back:" in captured
+    assert Path(result["wheel"]).is_file()
+
+
+def test_upgrade_and_validate_print_clean_errors(tmp_path: Path):
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = \"demo\"\ndependencies = [\"nitrostack>=0.3.0\"]\n",
+        encoding="utf-8",
+    )
+    with patch("nitrostack.cli.upgrade.verify_nitrostack_version"), patch(
+        "nitrostack.cli.upgrade._commit_file_changes",
+        side_effect=PermissionError("Permission denied"),
+    ):
+        code, output = _invoke_cli(["upgrade", "--version", "1.0.0"], tmp_path)
+    assert code == 1
+    assert "Error:" in output
+    assert "Traceback" not in output
+    assert "Permission denied" in output
+
+    (tmp_path / "broken.py").write_bytes(b"\xff\xfe not utf-8")
+    code, output = _invoke_cli(["validate"], tmp_path)
+    assert code == 1
+    assert "Error:" in output
+    assert "Traceback" not in output
+    assert "codec can't decode" in output
+
+
+def test_pack_and_validate_agree_on_bom_dependencies(tmp_path: Path):
+    body = (
+        "[project]\n"
+        'name = "demo"\n'
+        'version = "0.1.0"\n'
+        "dependencies = [\n"
+        '    "uvicorn[standard]>=0.20",\n'
+        '    "nitrostack>=0.3.0",\n'
+        "]\n"
+    )
+    (tmp_path / "pyproject.toml").write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+    (tmp_path / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    for excluded in (".cache", ".idea", ".vscode", ".hg", ".svn"):
+        (tmp_path / excluded).mkdir()
+        (tmp_path / excluded / "junk.py").write_text("x = 1\n", encoding="utf-8")
+    pack_deps = parse_pyproject_dependencies((tmp_path / "pyproject.toml").read_text(encoding="utf-8-sig"))
+    from nitrostack.cli.validators import _parse_pyproject_dependencies as validate_parse
+    validate_deps = validate_parse((tmp_path / "pyproject.toml").read_text(encoding="utf-8-sig"))
+    assert pack_deps == validate_deps
+    assert pack_deps[0] == "uvicorn[standard]>=0.20"
+    assert requirements_from_project(str(tmp_path)) == pack_deps
+    issues = validate_dependencies(str(tmp_path))
+    assert not any("not declared" in issue.message for issue in issues)
+
+    packed = {Path(rel).as_posix() for rel in collect_pack_files(str(tmp_path))}
+    walked = {
+        Path(path).relative_to(tmp_path).as_posix()
+        for path in _iter_python_files(str(tmp_path))
+    }
+    assert "main.py" in packed and "main.py" in walked
+    assert {name for name in packed if "/" in name and name.split("/")[0].startswith(".")} == set()
+    assert {name for name in walked if "/" in name} == set()
+    assert packed & {"pyproject.toml"} == {"pyproject.toml"}
 
 
 if __name__ == "__main__":
