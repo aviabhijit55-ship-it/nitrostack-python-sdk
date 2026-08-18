@@ -12,15 +12,19 @@ from nitrostack.core.decorators import (
     PromptMessage,
     ToolInvocation,
     ToolExamples,
+    widget_resource_uri,
 )
 from nitrostack.core.context import (
     ExecutionContext,
     AuthContext,
     TaskContext,
-    TaskCancelledError,
 )
 from nitrostack.core.task import (
-    TaskRegistry,
+    TaskManager,
+    TaskData,
+    TaskStatus,
+    TERMINAL_STATUSES,
+    is_terminal_status,
 )
 from nitrostack.core.di import (
     injectable,
@@ -39,6 +43,11 @@ from nitrostack.core.errors import (
     ValidationError,
     ResourceNotFoundError,
     PromptNotFoundError,
+    TaskCancelledError,
+    TaskNotFoundError,
+    TaskAlreadyTerminalError,
+    InvalidTaskTransitionError,
+    TaskExpiredError,
 )
 from nitrostack.core.pipeline import (
     use_guards,
@@ -72,6 +81,22 @@ from nitrostack.auth.oauth import (
 from nitrostack.auth.config import (
     ConfigModule,
     ConfigService,
+)
+from nitrostack.widgets import (
+    Component,
+    WidgetCsp,
+    WidgetOptions,
+    create_component,
+    get_app_mode,
+    get_widget_mime_type,
+    is_mcp_app_mode,
+    is_openai_mode,
+    OPENAI_SKYBRIDGE_MIME_TYPE,
+    RESOURCE_MIME_TYPE_MCP_APP,
+    RESOURCE_MIME_TYPE_OPENAI,
+)
+from nitrostack.testing import (
+    NitroTestingModule,
 )
 from nitrostack.testing import (
     NitroTestingModule,
@@ -124,5 +149,26 @@ __all__ = [
     "NitroTestingModule",
     "TaskContext",
     "TaskCancelledError",
-    "TaskRegistry",
+    "TaskManager",
+    "TaskData",
+    "TaskStatus",
+    "TERMINAL_STATUSES",
+    "is_terminal_status",
+    "TaskNotFoundError",
+    "TaskAlreadyTerminalError",
+    "InvalidTaskTransitionError",
+    "TaskExpiredError",
+    "widget_resource_uri",
+    "Component",
+    "WidgetCsp",
+    "WidgetOptions",
+    "create_component",
+    "get_app_mode",
+    "get_widget_mime_type",
+    "is_mcp_app_mode",
+    "is_openai_mode",
+    "OPENAI_SKYBRIDGE_MIME_TYPE",
+    "RESOURCE_MIME_TYPE_MCP_APP",
+    "RESOURCE_MIME_TYPE_OPENAI",
+    "NitroTestingModule",
 ]

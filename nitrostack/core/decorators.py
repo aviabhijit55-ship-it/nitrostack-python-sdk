@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Dict, Optional, Type, Literal
+from typing import Any, Callable, List, Dict, Optional, Type, Literal, Union
 from functools import wraps
+
+from nitrostack.widgets.component import WidgetOptions, parse_widget_options
 
 @dataclass
 class ToolAnnotations:
@@ -69,6 +71,24 @@ class PromptConfig:
     description: str
     arguments: List[PromptArgument] = field(default_factory=list)
 
+
+def widget_resource_uri(route_path: str) -> str:
+    """Normalize a widget route to the MCP Apps `ui://` resource URI.
+
+    MCP Inspector throws (and blanks the Tools tab) if `_meta.ui.resourceUri`
+    is set to anything that does not start with `ui://`.
+    """
+    route = (route_path or "").strip()
+    if not route:
+        raise ValueError("widget route must not be empty")
+    if route.startswith("ui://"):
+        return route
+    name = route.strip("/").removeprefix("widget/").removesuffix(".html").strip("/")
+    if not name:
+        raise ValueError("widget route must not be empty")
+    return f"ui://widget/{name}.html"
+
+
 def tool(
     name: str,
     description: str,
@@ -106,27 +126,20 @@ def tool(
             metadata=metadata,
             is_initial=getattr(func, "_mcp_is_initial", False)
         )
-        # Check if function already had a widget decorator applied first
-        widget_route = getattr(func, "_mcp_widget", None)
-        if widget_route:
-            config.metadata["ui/template"] = widget_route
-            config.metadata["ui"] = {"resourceUri": widget_route}
-            config.metadata["openai/outputTemplate"] = widget_route
-            
         func._mcp_tool_config = config
         return func
     return decorator
 
-def widget(route_path: str):
+def widget(route_or_options: Union[str, WidgetOptions, Dict[str, Any]]):
     """
     Decorator to associate a UI widget route with a tool.
+
+    Accepts a route string, :class:`WidgetOptions`, or a snake_case dict.
     """
+    parse_widget_options(route_or_options)
+
     def decorator(func: Callable):
-        func._mcp_widget = route_path
-        if hasattr(func, "_mcp_tool_config"):
-            func._mcp_tool_config.metadata["ui/template"] = route_path
-            func._mcp_tool_config.metadata["ui"] = {"resourceUri": route_path}
-            func._mcp_tool_config.metadata["openai/outputTemplate"] = route_path
+        func._mcp_widget = route_or_options
         return func
     return decorator
 

@@ -4,7 +4,9 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Protocol, List, Dict, Optional
 
-# Protocol for Logger matching TS Winstron logger equivalent (Section 13)
+from nitrostack.core.errors import TaskCancelledError
+
+# Logger protocol used by ExecutionContext (Section 13)
 class Logger(Protocol):
     def debug(self, message: str, meta: dict | None = None) -> None: ...
     def info(self, message: str, meta: dict | None = None) -> None: ...
@@ -84,42 +86,88 @@ class AuthContext:
     claims: Dict[str, Any] = field(default_factory=dict)  # custom claims
     token_payload: Any = None        # full decoded token
 
-class TaskCancelledError(Exception):
-    """Raised when an MCP background task has been cancelled."""
-    pass
-
 class TaskContext:
-    """Context representation for long-running asynchronous MCP tasks."""
-    def __init__(self, task_id: str):
+    """
+    Context representation for long-running asynchronous MCP tasks.
+
+    Public methods (``update_progress``, ``cancel``, ``throw_if_cancelled``) are
+    preserved for tool authors. Internally this wraps a ``TaskManager`` instance.
+
+    ``session`` / ``progress_token`` are optional and, when both are present, let
+    ``update_progress()`` push a live ``notifications/progress`` message over
+    whichever transport (STDIO or Streamable HTTP) initiated the task —
+    transport-agnostic since both use the same ``mcp.server.session.ServerSession``.
+    The client only receives these if it supplied a ``progressToken`` in the
+    original ``tools/call`` request's ``_meta``; ``TaskManager``-backed polling via
+    ``tasks/get`` always works regardless, so this is additive, not required.
+    """
+
+    def __init__(
+        self,
+        task_id: str,
+        task_manager: Any = None,
+        *,
+        session: Any = None,
+        progress_token: Any = None,
+    ):
         self.task_id = task_id
         self.progress_message: str = ""
         self.is_cancelled: bool = False
+        self._task_manager = task_manager
+        self._session = session
+        self._progress_token = progress_token
+        self._progress_count = 0
 
     def update_progress(self, message: str) -> None:
         self.progress_message = message
+        manager = self._task_manager
+        if manager is not None:
+            try:
+                manager.update_progress(self.task_id, message)
+            except Exception:
+                # Task may already be terminal/expired — ignore for handler ergonomics.
+                pass
+        self._push_progress_notification(message)
+
+    def _push_progress_notification(self, message: str) -> None:
+        if self._session is None or self._progress_token is None:
+            return
+        self._progress_count += 1
         try:
-            from nitrostack.core.task import TaskRegistry
-            TaskRegistry.update_progress(self.task_id, message)
+            import asyncio
+            asyncio.create_task(
+                self._session.send_progress_notification(
+                    progress_token=self._progress_token,
+                    progress=self._progress_count,
+                    message=message,
+                )
+            )
         except Exception:
+            # Best-effort: a client that didn't request progress updates, a
+            # transport that already closed, or no running event loop should
+            # never break task execution itself.
             pass
 
     def cancel(self) -> None:
         self.is_cancelled = True
+        manager = self._task_manager
+        if manager is None:
+            return
         try:
-            from nitrostack.core.task import TaskRegistry
-            TaskRegistry.cancel_task(self.task_id)
+            manager.cancel_task(self.task_id)
         except Exception:
             pass
 
     def throw_if_cancelled(self) -> None:
-        try:
-            from nitrostack.core.task import TaskRegistry
-            if TaskRegistry.is_task_cancelled(self.task_id):
-                self.is_cancelled = True
-        except Exception:
-            pass
+        manager = self._task_manager
+        if manager is not None:
+            try:
+                if manager.is_task_cancelled(self.task_id):
+                    self.is_cancelled = True
+            except Exception:
+                pass
         if self.is_cancelled:
-            raise TaskCancelledError(f"Task {self.task_id} has been cancelled.")
+            raise TaskCancelledError(self.task_id)
 
 @dataclass
 class ExecutionContext:

@@ -1,8 +1,11 @@
 import os
+import re
 import sys
 import argparse
+import shutil
 import subprocess
 import time
+from pathlib import Path
 
 MAIN_TEMPLATE = """import asyncio
 from nitrostack import McpApplicationFactory
@@ -205,7 +208,7 @@ import os
     imports=[
         ConfigModule.for_root(
             env_file_path=".env",
-            defaults={"RESOURCE_URI": "https://mcplocal", "PORT": "8000"}
+            defaults={"RESOURCE_URI": "https://mcplocal", "PORT": "3000"}
         ),
         # Configure OAuth resource protection
         OAuthModule.for_root(
@@ -560,6 +563,9 @@ class FlightDetailsInput(BaseModel):
 class AirportSearchInput(BaseModel):
     query: str = Field(description="The search query for airports (e.g., 'London', 'New York')")
 
+class GetAirlinesInput(BaseModel):
+    pass
+
 @injectable(deps=[DuffelService])
 class FlightTools:
     def __init__(self, service: DuffelService):
@@ -603,10 +609,11 @@ class FlightTools:
     @tool(
         name="get_airlines",
         title="Get Airlines",
-        description="Get list of common airlines."
+        description="Get list of common airlines.",
+        input_schema=GetAirlinesInput
     )
     @use_guards(OAuthGuard, create_scope_guard(["read"]))
-    async def get_airlines(self, context: ExecutionContext) -> dict:
+    async def get_airlines(self, input: GetAirlinesInput, context: ExecutionContext) -> dict:
         context.logger.info("Fetching common airlines")
         res = await self.service.get_airlines()
         return {"airlines": res}
@@ -790,14 +797,25 @@ The tools in this server use the `@use_guards(OAuthGuard, create_scope_guard([..
 When calling protected tools, the client must pass a valid Bearer token in the `Authorization` header.
 """
 
-ENV_TEMPLATE = """PORT=8000
+ENV_TEMPLATE = """PORT=3000
 NODE_ENV=development
 """
+
+DEFAULT_PROJECT_NAME = "my-mcp-server"
+DEFAULT_MCP_PORT = "3000"
+DEFAULT_WIDGETS_PORT = "3001"
+
+# Official CLI names → on-disk template directories.
+OFFICIAL_TEMPLATES = {
+    "python-starter": "starter",
+    "python-pizzaz": "pizzaz",
+    "python-oauth": "flight-booking",
+}
 
 REQUIREMENTS_TEMPLATE = """nitrostack
 """
 
-TOOL_TEMPLATE = """from nitrostack import tool, ExecutionContext
+TOOL_TEMPLATE = """from nitrostack import tool, widget, ExecutionContext
 from pydantic import BaseModel
 
 class {camel_name}Input(BaseModel):
@@ -809,10 +827,143 @@ class {camel_name}Input(BaseModel):
     description="Implement your tool description here",
     input_schema={camel_name}Input
 )
+@widget("{name}")
 async def {name}_handler(input: {camel_name}Input, context: ExecutionContext):
     context.logger.info("Executing tool {name}")
     return {{"status": "success"}}
 """
+
+WIDGET_PREVIEW_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Widget preview</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    iframe { width: 100%; height: 380px; border: 1px solid #ddd; border-radius: 8px; }
+    button { margin: 0 8px 12px 0; }
+    textarea { width: 100%; height: 110px; font-family: ui-monospace, monospace; }
+    .note { color: #475569; font-size: 0.9rem; max-width: 820px; line-height: 1.45; }
+  </style>
+</head>
+<body>
+  <p class="note">
+    This static file does <strong>not</strong> follow MCP Inspector tool calls.
+    Inspector JSON is the live result (e.g. all matching pizza shops). Open
+    <code>http://localhost:3000/widgets/preview</code> with the server running to
+    render that same output, or paste <code>structuredContent</code> below and Inject.
+  </p>
+  <div id="buttons"></div>
+  <textarea id="json">__DEFAULT_JSON__</textarea>
+  <p><button id="inject">Inject JSON into iframe</button></p>
+  <iframe id="frame" src="out/__FIRST__.html"></iframe>
+  <script>
+    const routes = __ROUTES__;
+    const buttons = document.getElementById("buttons");
+    const frame = document.getElementById("frame");
+    routes.forEach((route) => {
+      const b = document.createElement("button");
+      b.textContent = route;
+      b.onclick = () => { frame.src = "out/" + route + ".html"; };
+      buttons.appendChild(b);
+    });
+    function inject() {
+      let data = {};
+      try { data = JSON.parse(document.getElementById("json").value); } catch (e) { alert("Invalid JSON"); return; }
+      const win = frame.contentWindow;
+      if (!win) return;
+      const payload = { structuredContent: data };
+      try {
+        win.openai = Object.assign(win.openai || {}, { toolOutput: payload });
+        win.dispatchEvent(new CustomEvent("openai:set_globals", { detail: { globals: { toolOutput: payload } } }));
+      } catch (e) {}
+      win.postMessage({ type: "setGlobals", globals: { toolOutput: payload } }, "*");
+      win.postMessage({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: payload }, "*");
+    }
+    document.getElementById("inject").onclick = inject;
+    frame.addEventListener("load", () => setTimeout(inject, 80));
+  </script>
+</body>
+</html>
+"""
+
+SAMPLE_PIZZA_PREVIEW_JSON = """{
+  "shops": [
+    {
+      "id": "tonys-pizza",
+      "name": "Tony's New York Pizza",
+      "address": "123 Main St, San Francisco, CA 94102",
+      "rating": 4.5,
+      "priceLevel": 2,
+      "openNow": true,
+      "image": "https://images.unsplash.com/photo-1513104890138-7c749659a591"
+    }
+  ],
+  "totalShops": 1
+}"""
+
+
+def write_widget_html(project_dir: str, route: str, *, overwrite: bool = False) -> str:
+    """Write ``widgets/out/{route}.html`` if missing (Python-only static widget)."""
+    from nitrostack.widgets.route_templates import build_widget_html_for_route
+
+    route = (route or "").strip()
+    if not route:
+        raise ValueError("widget route must not be empty")
+    out_dir = os.path.join(project_dir, "widgets", "out")
+    os.makedirs(out_dir, exist_ok=True)
+    dest = os.path.join(out_dir, f"{route}.html")
+    if overwrite or not os.path.exists(dest):
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(build_widget_html_for_route(route))
+    return dest
+
+
+def write_widget_preview(project_dir: str) -> None:
+    out_dir = os.path.join(project_dir, "widgets", "out")
+    if not os.path.isdir(out_dir):
+        return
+    routes = sorted(p[:-5] for p in os.listdir(out_dir) if p.endswith(".html"))
+    if not routes:
+        return
+    first = "pizza-list" if "pizza-list" in routes else routes[0]
+    default_json = '{"status":"success"}'
+    if "pizza-list" in routes or "pizza-map" in routes:
+        default_json = SAMPLE_PIZZA_PREVIEW_JSON
+    html = (
+        WIDGET_PREVIEW_HTML.replace("__FIRST__", first)
+        .replace("__ROUTES__", "[" + ", ".join(f'"{r}"' for r in routes) + "]")
+        .replace("__DEFAULT_JSON__", default_json)
+    )
+    dest = os.path.join(project_dir, "widgets", "preview.html")
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(html)
+
+
+def ensure_python_widgets(project_dir: str) -> list:
+    """Create missing ``widgets/out/{route}.html`` for every ``@widget`` in the project."""
+    routes = []
+    for root, _dirs, files in os.walk(project_dir):
+        parts = set(root.split(os.sep))
+        if "node_modules" in parts or ".venv" in parts:
+            continue
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(root, name)
+            try:
+                text = Path(path).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            routes.extend(re.findall(r'@widget\(\s*["\']([^"\']+)["\']', text))
+            routes.extend(re.findall(r'WidgetOptions\(\s*route\s*=\s*["\']([^"\']+)["\']', text))
+    unique = []
+    for route in routes:
+        if route not in unique:
+            unique.append(route)
+        write_widget_html(project_dir, route, overwrite=False)
+    write_widget_preview(project_dir)
+    return unique
 
 MODULE_TEMPLATE = """from nitrostack import module
 
@@ -841,10 +992,179 @@ def print_banner():
 ╚══════════════════════════════════════════════════════════╝\033[0m"""
     print(banner)
 
-def init_project(name: str, template: str = None):
+def _prompt(message: str, default: str = "") -> str:
+    default_hint = f" [{default}]" if default else ""
+    sys.stdout.write(f"\033[32m? \033[1;37m{message}:\033[0m{default_hint} ")
+    sys.stdout.flush()
+    try:
+        value = sys.stdin.readline().strip()
+    except Exception:
+        value = ""
+    return value or default
+
+
+def _resolve_template(template: str) -> str:
+    key = (template or "").strip().lower()
+    if key not in OFFICIAL_TEMPLATES:
+        names = ", ".join(OFFICIAL_TEMPLATES)
+        print(f"Error: Unknown template '{template}'. Use one of: {names}")
+        sys.exit(1)
+    return key
+
+
+def _prompt_template() -> str:
+    print("\033[32m? \033[1;37mChoose a template:\033[0m")
+    print("  \033[34m1. python-starter\033[0m     Starter — simple calculator for learning basics")
+    print("  \033[34m2. python-pizzaz\033[0m      Advanced — pizza shop finder with maps & widgets")
+    print("  \033[34m3. python-oauth\033[0m       Flight booking with OAuth 2.1 auth")
+    by_choice = {
+        "1": "python-starter",
+        "2": "python-pizzaz",
+        "3": "python-oauth",
+    }
+    while True:
+        choice = _prompt("Enter choice (1-3) or template name", "1")
+        if choice in by_choice:
+            return by_choice[choice]
+        if choice.lower() in OFFICIAL_TEMPLATES:
+            return choice.lower()
+        print("Please enter 1, 2, 3, or an explicit template name (python-starter, python-pizzaz, python-oauth).")
+
+
+def _normalize_port(value, label):
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        print(f"Error: Invalid {label} '{value}'.")
+        sys.exit(1)
+    if port < 1 or port > 65535:
+        print(f"Error: {label} {port} is out of range (1-65535).")
+        sys.exit(1)
+    return str(port)
+
+
+def _read_project_env():
+    values = {}
+    env_path = os.path.join(os.getcwd(), ".env")
+    if not os.path.exists(env_path):
+        return values
+    try:
+        with open(env_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                values[key.strip()] = val.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return values
+
+
+def _resolve_runtime_ports(port=None, widget=None):
+    """Resolve MCP and widget ports. Explicit --port/--widget flags override defaults."""
+    project_env = _read_project_env()
+    if port is not None:
+        mcp_port = _normalize_port(port, "--port")
+    else:
+        mcp_port = (
+            os.environ.get("PORT")
+            or os.environ.get("MCP_SERVER_PORT")
+            or project_env.get("PORT")
+            or project_env.get("MCP_SERVER_PORT")
+            or DEFAULT_MCP_PORT
+        )
+        mcp_port = str(mcp_port)
+        if widget is None and mcp_port == DEFAULT_WIDGETS_PORT:
+            mcp_port = DEFAULT_MCP_PORT
+
+    if widget is not None:
+        widgets_port = _normalize_port(widget, "--widget")
+    else:
+        widgets_port = os.environ.get("WIDGETS_DEV_PORT") or project_env.get("WIDGETS_DEV_PORT") or DEFAULT_WIDGETS_PORT
+        widgets_port = str(widgets_port)
+        if port is None and widgets_port == DEFAULT_MCP_PORT:
+            widgets_port = DEFAULT_WIDGETS_PORT
+    return mcp_port, widgets_port
+
+
+def _upsert_env_var(lines, key, value):
+    prefix = f"{key}="
+    updated = False
+    new_lines = []
+    for line in lines:
+        if line.startswith(prefix):
+            new_lines.append(f"{key}={value}\n")
+            updated = True
+        else:
+            new_lines.append(line)
+    if not updated:
+        new_lines.append(f"{key}={value}\n")
+    return new_lines
+
+
+def _prompt_yes_no(message: str, default_yes: bool = True) -> bool:
+    hint = "Y/n" if default_yes else "y/N"
+    sys.stdout.write(f"\033[32m? \033[1;37m{message}:\033[0m ({hint}) ")
+    sys.stdout.flush()
+    try:
+        ans = sys.stdin.readline().strip().lower()
+    except Exception:
+        ans = ""
+    if not ans:
+        return default_yes
+    if ans in ("y", "yes"):
+        return True
+    if ans in ("n", "no"):
+        return False
+    return default_yes
+
+
+def _find_npm():
+    npm = shutil.which("npm") or shutil.which("npm.cmd")
+    if not npm:
+        raise FileNotFoundError(
+            "npm was not found on PATH. Install Node.js (https://nodejs.org) and retry."
+        )
+    return npm
+
+
+def _run_npm(args, **kwargs):
+    """Run npm without shell=True. A list + shell=True is treated as `sh -c npm` and drops flags."""
+    kwargs.pop("shell", None)
+    return subprocess.run([_find_npm(), *args], **kwargs)
+
+
+def _popen_npm(args, **kwargs):
+    kwargs.pop("shell", None)
+    return subprocess.Popen([_find_npm(), *args], **kwargs)
+
+
+def _add_port_flags(parser):
+    parser.add_argument(
+        "--port",
+        default=None,
+        help=f"MCP HTTP port (default: {DEFAULT_MCP_PORT}; overrides PORT when set)",
+    )
+    parser.add_argument(
+        "--widget",
+        default=None,
+        help=f"Widget dev server port (default: {DEFAULT_WIDGETS_PORT}; overrides WIDGETS_DEV_PORT when set)",
+    )
+
+
+def init_project(name: str = None, template: str = None, skip_install: bool = False, port=None, widget=None):
     print_banner()
-    
-    # 1. Overwrite check
+
+    # 1. Project name — optional CLI arg, otherwise the next readline
+    if not name:
+        name = _prompt("Project name", DEFAULT_PROJECT_NAME)
+    name = (name or "").strip()
+    if not name:
+        print("Error: Project name cannot be empty.")
+        sys.exit(1)
+
+    # 2. Overwrite check
     if os.path.exists(name):
         sys.stdout.write(f"\033[32m? \033[1;37mDirectory '{name}' already exists. Overwrite?\033[0m (Yes/No) [No]: ")
         sys.stdout.flush()
@@ -852,64 +1172,45 @@ def init_project(name: str, template: str = None):
         if ans not in ("y", "yes"):
             print("Initialization cancelled.")
             sys.exit(0)
-        # Delete existing folder
-        import shutil
         shutil.rmtree(name, ignore_errors=True)
-        
-    # 2. Select template
+
+    # 3. Select template (explicit python-* names)
     if not template:
-        print("\033[32m? \033[1;37mChoose a template:\033[0m")
-        print("  \033[34m1. Starter\033[0m     Simple calculator/converter for learning basics")
-        print("  \033[34m2. Advanced\033[0m    Pizza shop finder with maps & widgets")
-        print("  \033[34m3. OAuth\033[0m       Flight booking with OAuth 2.1 auth")
-        
-        while True:
-            sys.stdout.write("\033[32m? \033[1;37mEnter choice (1-3) [1]:\033[0m ")
-            sys.stdout.flush()
-            choice = sys.stdin.readline().strip()
-            if not choice or choice == "1":
-                template = "starter"
-                break
-            elif choice == "2":
-                template = "pizzaz"
-                break
-            elif choice == "3":
-                template = "flight-booking"
-                break
+        template = _prompt_template()
     else:
-        # Normalize command line template input
-        template = template.lower()
-        if template in ("starter", "calculator"):
-            template = "starter"
-        elif template in ("advanced", "pizzaz", "food-delivery"):
-            template = "pizzaz"
-        elif template in ("oauth", "flight-booking"):
-            template = "flight-booking"
-                
-    # 3. Description and Author
-    sys.stdout.write("\033[32m? \033[1;37mDescription:\033[0m [My awesome MCP server]: ")
-    sys.stdout.flush()
-    description = sys.stdin.readline().strip() or "My awesome MCP server"
-    
-    sys.stdout.write("\033[32m? \033[1;37mAuthor:\033[0m [developer]: ")
-    sys.stdout.flush()
-    author = sys.stdin.readline().strip() or "developer"
-    
-    # 4. Copy template directory
+        template = _resolve_template(template)
+
+    # 4. Description and Author
+    description = _prompt("Description", "My awesome MCP server")
+    author = _prompt("Author", "developer")
+
+    # 5. Install dependencies (Y/n). --skip-install skips the prompt.
+    if skip_install:
+        install_deps = False
+    else:
+        install_deps = _prompt_yes_no("Install dependencies", default_yes=True)
+
+    mcp_port = _normalize_port(port, "--port") if port is not None else DEFAULT_MCP_PORT
+    widgets_port = _normalize_port(widget, "--widget") if widget is not None else DEFAULT_WIDGETS_PORT
+
+    # 6. Copy template directory
     import nitrostack
-    import shutil
     package_dir = os.path.dirname(nitrostack.__file__)
-    template_src_dir = os.path.join(package_dir, "templates", template)
-    
+    template_dir = OFFICIAL_TEMPLATES[template]
+    template_src_dir = os.path.join(package_dir, "templates", template_dir)
+
     if not os.path.exists(template_src_dir):
         print(f"Error: Template '{template}' not found at '{template_src_dir}'.")
         sys.exit(1)
-        
+
     shutil.copytree(template_src_dir, name)
+    widget_routes = ensure_python_widgets(name)
     print("\n\033[32m✓\033[0m Project created")
-    print("\033[32m✓\033[0m Dependencies installed")
-    
-    # 5. Update .env file
+    if widget_routes:
+        print(f"\033[32m✓\033[0m Python widgets: {', '.join(widget_routes)}")
+        print("    HTML in widgets/out/ — preview: widgets/preview.html")
+
+    # 7. Update .env file
     env_path = os.path.join(name, ".env")
     if os.path.exists(env_path):
         with open(env_path, "r", encoding="utf-8") as f:
@@ -928,10 +1229,13 @@ def init_project(name: str, template: str = None):
             new_lines.append(f'SERVER_DESC="{description}"\n')
         if not has_author:
             new_lines.append(f'SERVER_AUTHOR="{author}"\n')
+        new_lines = _upsert_env_var(new_lines, "PORT", mcp_port)
+        new_lines = _upsert_env_var(new_lines, "WIDGETS_DEV_PORT", widgets_port)
+        new_lines = _upsert_env_var(new_lines, "NITROSTACK_APP_MODE", "universal")
         with open(env_path, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
 
-    # 6. Update widgets package.json
+    # 8. Update widgets package.json
     widgets_package_path = os.path.join(name, "src", "widgets", "package.json")
     if os.path.exists(widgets_package_path):
         import json
@@ -939,23 +1243,34 @@ def init_project(name: str, template: str = None):
             with open(widgets_package_path, "r", encoding="utf-8") as f:
                 pkg = json.load(f)
             pkg["name"] = f"{name}-widgets"
+            # The port is passed once by the CLI (`npm run dev -- --port N`), so it
+            # is deliberately not baked into the script.
+            scripts = pkg.setdefault("scripts", {})
+            scripts["dev"] = "next dev"
+            scripts["start"] = "next start"
             with open(widgets_package_path, "w", encoding="utf-8") as f:
                 json.dump(pkg, f, indent=2)
         except Exception:
             pass
 
-    # 7. Run npm install inside widgets directory
+    # 9. Run npm install inside widgets directory
     widgets_dir = os.path.join(name, "src", "widgets")
-    if os.path.exists(widgets_dir):
+    if os.path.exists(widgets_dir) and install_deps:
         print("Installing widget dependencies...")
         try:
-            subprocess.run(["npm", "--version"], shell=True, capture_output=True, check=True)
-            subprocess.run(["npm", "install"], cwd=widgets_dir, shell=True, check=True)
+            _run_npm(["--version"], capture_output=True, check=True, text=True)
+            _run_npm(["install"], cwd=widgets_dir, check=True)
             print("\033[32m✓\033[0m Widget dependencies installed\n")
-        except Exception as e:
-            print(f"Warning: Failed to install widget dependencies: {e}")
+        except FileNotFoundError as e:
+            print(f"Warning: {e}")
             print("Please run 'npm install' inside 'src/widgets' manually.\n")
-            
+        except subprocess.CalledProcessError as e:
+            detail = (getattr(e, "stderr", None) or getattr(e, "stdout", None) or str(e)).strip()
+            print(f"Warning: Failed to install widget dependencies: {detail}")
+            print("Please run 'npm install' inside 'src/widgets' manually.\n")
+    elif not install_deps:
+        print("\033[32m✓\033[0m Skipped dependency install")
+
     # Success Card
     abs_path = os.path.abspath(name)
     success_box = f"""\033[36m╔══════════════════════════════════════════════════════════╗
@@ -966,43 +1281,52 @@ def init_project(name: str, template: str = None):
 ║   Path: {abs_path:<48} ║
 ╚══════════════════════════════════════════════════════════╝\033[0m"""
     print(success_box)
-    
+
     # Next Steps
     print("\n\033[1;37mNext steps:\033[0m")
     print(f" 1. \033[34mcd {name}\033[0m")
-    if template == "flight-booking":
+    if template == "python-oauth":
         print(" 2. Configure OAuth credentials in your \033[34m.env\033[0m file")
         print("    See \033[34mOAUTH_SETUP.md\033[0m for provider guides")
     else:
         print(" 2. Configure environment variables in \033[34m.env\033[0m")
     print(" 3. Start development server: \033[34mnitrostack-py dev\033[0m (or `python -m nitrostack.cli.main dev`)")
-    print(" 4. Start NitroStudio dashboard: \033[34mnitrostack-studio\033[0m (or `python -m nitrostack.studio`)")
+    print(" 4. Preview widgets: \033[34mhttp://localhost:3000/widgets/preview\033[0m (server running)")
+    print("    Static file (manual JSON): \033[34mopen widgets/preview.html\033[0m")
+    print(" 5. Inspector (HTTP): \033[34mMCP_TRANSPORT_TYPE=http MCP_STATELESS=true NITROSTACK_APP_MODE=universal python main.py\033[0m")
+    print("    Connect Streamable HTTP to \033[34mhttp://localhost:3000/mcp\033[0m with \033[34mAuthentication = Off\033[0m")
+    print("    Apps tab renders the widget from live \033[34mstructuredContent\033[0m (not widgets/preview.html)")
+    print("    For open shops only set \033[34mopenNow=true\033[0m (list) or \033[34mfilter=open_now\033[0m (map)")
+    print(" 6. NitroStudio cannot folder-connect a Python project (it looks for @nitrostack/core).")
+    print("    Use Inspector HTTP as above, or Studio's custom MCP URL if it offers Streamable HTTP.")
     print("\nHappy coding! 🚀\n")
 
-def run_dev():
+def run_dev(port=None, widget=None):
     target = "main.py"
     if not os.path.exists(target):
         print("Error: main.py not found in current directory.")
         sys.exit(1)
-        
+
+    mcp_port, widgets_port = _resolve_runtime_ports(port, widget)
+
     print(f"Starting hot-reload development server for {target}...")
+    print(f"MCP server port: {mcp_port}")
     process = None
     widgets_process = None
-    
+
     # Check if Next.js widgets are present
     widgets_dir = os.path.join(os.getcwd(), "src", "widgets")
-    if os.path.exists(widgets_dir) and os.path.exists(os.path.join(widgets_dir, "package.json")):
-        print("Starting widget development server on port 3001...")
+    has_widgets = os.path.exists(widgets_dir) and os.path.exists(os.path.join(widgets_dir, "package.json"))
+    if has_widgets:
+        print(f"Starting widget development server on port {widgets_port}...")
         try:
-            # Spawn npm run dev -- --port 3001
-            widgets_process = subprocess.Popen(
-                ["npm", "run", "dev", "--", "--port", "3001"],
+            widgets_process = _popen_npm(
+                ["run", "dev", "--", "--port", str(widgets_port)],
                 cwd=widgets_dir,
-                shell=True
             )
         except Exception as e:
             print(f"Warning: Could not start widget development server: {e}")
-            
+
     def start_process():
         nonlocal process
         if process:
@@ -1016,6 +1340,9 @@ def run_dev():
                     pass
         env = os.environ.copy()
         env["PYTHONPATH"] = os.path.abspath(".")
+        env["PORT"] = mcp_port
+        if has_widgets:
+            env["WIDGETS_DEV_PORT"] = str(widgets_port)
         process = subprocess.Popen([sys.executable, target], env=env)
 
     def cleanup():
@@ -1101,19 +1428,55 @@ def run_dev():
         print("\nStopping development server...")
         cleanup()
 
-def run_start():
+def run_start(port=None, widget=None):
     target = "main.py"
     if not os.path.exists(target):
         print("Error: main.py not found in current directory.")
         sys.exit(1)
-    
+
+    mcp_port, widgets_port = _resolve_runtime_ports(port, widget)
+
     print(f"Starting production server for {target}...")
+    print(f"MCP HTTP: http://localhost:{mcp_port}/mcp")
     env = os.environ.copy()
     env["PYTHONPATH"] = os.path.abspath(".")
+    env["PORT"] = mcp_port
+    env["WIDGETS_DEV_PORT"] = widgets_port
+    env["NODE_ENV"] = "production"
+    # Select HTTP explicitly rather than letting NODE_ENV=production fall through
+    # to dual. Dual shuts HTTP down when STDIO reaches EOF, so `start` would exit
+    # immediately wherever stdin is not held open (Docker without -i, systemd, CI).
+    # `setdefault` keeps an explicit MCP_TRANSPORT_TYPE from the caller.
+    env.setdefault("MCP_TRANSPORT_TYPE", "http")
+
+    widgets_dir = os.path.join(os.getcwd(), "src", "widgets")
+    widgets_process = None
+    if os.path.exists(widgets_dir) and os.path.exists(os.path.join(widgets_dir, "package.json")):
+        # `next start` needs a production build; Popen would succeed and the child
+        # would fail with a bare "Could not find a production build", so check here.
+        if not os.path.exists(os.path.join(widgets_dir, ".next")):
+            print("Widgets are not built yet — skipping the widget server.")
+            print("Run 'npm run build' inside 'src/widgets', then retry.\n")
+        else:
+            print(f"Starting widget server on port {widgets_port}...")
+            try:
+                widgets_process = _popen_npm(
+                    ["run", "start", "--", "--port", str(widgets_port)],
+                    cwd=widgets_dir,
+                )
+            except Exception as e:
+                print(f"Warning: Could not start widget server: {e}")
+
     try:
         subprocess.run([sys.executable, target], env=env)
     except KeyboardInterrupt:
         print("\nStopping server...")
+    finally:
+        if widgets_process:
+            try:
+                widgets_process.terminate()
+            except Exception:
+                pass
 
 def generate_tool(name: str):
     filename = f"{name}_tool.py"
@@ -1124,7 +1487,10 @@ def generate_tool(name: str):
     content = TOOL_TEMPLATE.format(name=name, camel_name=camel_name)
     with open(filename, "w", encoding="utf-8") as f:
         f.write(content)
+    html_path = write_widget_html(".", name, overwrite=False)
+    write_widget_preview(".")
     print(f"Generated tool boilerplate in '{filename}'")
+    print(f"Generated widget HTML in '{html_path}'")
 
 def generate_module(name: str):
     filename = f"{name}_module.py"
@@ -1238,14 +1604,23 @@ def main():
 
     # init command
     init_parser = subparsers.add_parser("init", help="Initialize a new NitroStack MCP server project")
-    init_parser.add_argument("name", help="Name of the project directory to create")
-    init_parser.add_argument("--template", choices=["calculator", "food-delivery", "flight-booking", "starter", "pizzaz", "oauth"], default=None, help="Template to use (default: interactive prompt)")
+    init_parser.add_argument("name", nargs="?", default=None, help="Name of the project directory (prompted if omitted)")
+    init_parser.add_argument(
+        "--template",
+        choices=list(OFFICIAL_TEMPLATES.keys()),
+        default=None,
+        help="Template to use: python-starter, python-pizzaz, python-oauth (default: interactive prompt)",
+    )
+    init_parser.add_argument("--skip-install", action="store_true", help="Skip installing widget npm dependencies")
+    _add_port_flags(init_parser)
 
     # dev command
-    subparsers.add_parser("dev", help="Start the hot-reloading development server")
+    dev_parser = subparsers.add_parser("dev", help="Start the hot-reloading development server")
+    _add_port_flags(dev_parser)
 
     # start command
-    subparsers.add_parser("start", help="Start the production server")
+    start_parser = subparsers.add_parser("start", help="Start the production server")
+    _add_port_flags(start_parser)
 
     # register command
     reg_parser = subparsers.add_parser("register", help="Register server script inside Claude Desktop configuration")
@@ -1269,11 +1644,17 @@ def main():
         sys.exit(1)
 
     if args.command == "init":
-        init_project(args.name, args.template)
+        init_project(
+            args.name,
+            args.template,
+            skip_install=args.skip_install,
+            port=args.port,
+            widget=args.widget,
+        )
     elif args.command == "dev":
-        run_dev()
+        run_dev(port=args.port, widget=args.widget)
     elif args.command == "start":
-        run_start()
+        run_start(port=args.port, widget=args.widget)
     elif args.command == "register":
         register_server(args.name, args.file)
     elif args.command == "generate":

@@ -37,6 +37,10 @@ class ConvertTempInput(BaseModel):
     from_unit: Literal["celsius", "fahrenheit", "kelvin"] = Field(description="Source temperature unit")
     to_unit: Literal["celsius", "fahrenheit", "kelvin"] = Field(description="Target temperature unit")
 
+class LongRunningInput(BaseModel):
+    steps: int = Field(default=3, description="Number of progress updates to emit")
+    delay_seconds: float = Field(default=1.0, description="Delay between each progress update")
+
 
 # 2. Injected Services (Section 5)
 @injectable(deps=[ConfigService])
@@ -177,6 +181,26 @@ class CalculatorController:
     def check_engine(self) -> bool:
         # Simple status check verification
         return self.calc_service.precision >= 0
+
+    # MCP Tool: long_running_task — Phase 3 manual test target for live
+    # `notifications/progress` pushes (see PHASE-3-http-transport.md). Poll via
+    # `tasks/get`, or open the Streamable HTTP standalone SSE stream (GET /mcp
+    # with the session id) and pass `_meta.progressToken` in this call to see
+    # progress notifications arrive incrementally instead.
+    @tool(
+        name="long_running_task",
+        title="Long Running Task",
+        description="Simulate a long-running task that reports progress at each step",
+        input_schema=LongRunningInput,
+        task_support="optional",
+    )
+    async def long_running_task(self, input: LongRunningInput, context: ExecutionContext) -> Dict[str, Any]:
+        for step in range(1, input.steps + 1):
+            if context.task:
+                context.task.update_progress(f"Step {step}/{input.steps}")
+                context.task.throw_if_cancelled()
+            await asyncio.sleep(input.delay_seconds)
+        return {"status": "success", "steps_completed": input.steps}
 
 
 # 4. Modules grouping controllers and services (Section 3)
