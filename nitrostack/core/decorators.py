@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Dict, Optional, Type, Literal
+from typing import Any, Callable, List, Dict, Optional, Type, Literal, Union
 from functools import wraps
+
+from nitrostack.widgets.component import WidgetOptions, parse_widget_options
 
 @dataclass
 class ToolAnnotations:
@@ -87,13 +89,6 @@ def widget_resource_uri(route_path: str) -> str:
     return f"ui://widget/{name}.html"
 
 
-def _apply_widget_metadata(metadata: Dict[str, Any], route_path: str) -> None:
-    uri = widget_resource_uri(route_path)
-    metadata["ui/template"] = uri
-    metadata["ui"] = {"resourceUri": uri}
-    metadata["openai/outputTemplate"] = uri
-
-
 def tool(
     name: str,
     description: str,
@@ -131,25 +126,20 @@ def tool(
             metadata=metadata,
             is_initial=getattr(func, "_mcp_is_initial", False)
         )
-        # Check if function already had a widget decorator applied first
-        widget_route = getattr(func, "_mcp_widget", None)
-        if widget_route:
-            _apply_widget_metadata(config.metadata, widget_route)
-            
         func._mcp_tool_config = config
         return func
     return decorator
 
-def widget(route_path: str):
+def widget(route_or_options: Union[str, WidgetOptions, Dict[str, Any]]):
     """
     Decorator to associate a UI widget route with a tool.
+
+    Accepts a route string, :class:`WidgetOptions`, or a snake_case dict.
     """
-    uri = widget_resource_uri(route_path)
+    parse_widget_options(route_or_options)
 
     def decorator(func: Callable):
-        func._mcp_widget = uri
-        if hasattr(func, "_mcp_tool_config"):
-            _apply_widget_metadata(func._mcp_tool_config.metadata, uri)
+        func._mcp_widget = route_or_options
         return func
     return decorator
 

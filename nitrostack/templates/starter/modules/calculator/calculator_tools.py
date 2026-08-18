@@ -15,6 +15,14 @@ class ConvertTemperatureInput(BaseModel):
     to_unit: Literal["celsius", "fahrenheit", "kelvin"] = Field(description="Unit to convert to")
 
 
+class CalculateOutput(BaseModel):
+    operation: str
+    a: float
+    b: float
+    result: float
+    expression: str
+
+
 def _to_celsius(value: float, from_unit: str) -> float:
     if from_unit == "celsius":
         return value
@@ -36,7 +44,8 @@ class CalculatorTools:
     @tool(
         name="calculate",
         description="Perform basic arithmetic calculations",
-        input_schema=CalculateInput
+        input_schema=CalculateInput,
+        output_schema=CalculateOutput,
     )
     @widget("calculator-result")
     async def calculate(self, input: CalculateInput, context: ExecutionContext) -> dict:

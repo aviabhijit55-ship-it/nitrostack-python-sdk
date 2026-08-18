@@ -171,6 +171,7 @@ def test_http_health_and_cors():
         assert root.status_code == 200
         assert "text/html" in root.headers.get("content-type", "")
         assert "MCP" in root.text
+        assert "/widgets/preview" in root.text
 
         version = client.get("/json/version")
         assert version.status_code == 200
@@ -634,6 +635,22 @@ def test_delete_terminates_live_session_and_404s_unknown_one():
     print("Success! DELETE /mcp terminates a live session and 404s an unknown one.")
 
 
+def test_oauth_register_returns_json_not_html():
+    """Inspector Auth-on DCR hits POST /register; HTML 404s parse as invalid OAuth JSON."""
+    app = asyncio.run(_build_app())
+    http_app = build_http_app(app, enable_cors=True, stateless=True)
+    with TestClient(http_app) as client:
+        resp = client.post("/register", json={"client_name": "inspector"})
+        assert resp.status_code == 404
+        assert "application/json" in resp.headers.get("content-type", "")
+        body = resp.json()
+        assert body["error"] == "invalid_request"
+        assert "OAuth" in body["error_description"]
+        well_known = client.get("/.well-known/oauth-authorization-server")
+        assert well_known.status_code == 404
+        assert well_known.json()["error"] == "invalid_request"
+
+
 if __name__ == "__main__":
     DIContainer.reset()
     test_http_health_and_cors()
@@ -649,4 +666,5 @@ if __name__ == "__main__":
     test_wildcard_and_missing_accept_are_honoured()
     test_unsupported_protocol_version_header_does_not_fail_request()
     test_delete_terminates_live_session_and_404s_unknown_one()
+    test_oauth_register_returns_json_not_html()
     print("\nAll Phase 3 transport tests passed successfully!")

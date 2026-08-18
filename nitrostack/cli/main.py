@@ -1,9 +1,11 @@
 import os
+import re
 import sys
 import argparse
 import shutil
 import subprocess
 import time
+from pathlib import Path
 
 MAIN_TEMPLATE = """import asyncio
 from nitrostack import McpApplicationFactory
@@ -813,7 +815,7 @@ OFFICIAL_TEMPLATES = {
 REQUIREMENTS_TEMPLATE = """nitrostack
 """
 
-TOOL_TEMPLATE = """from nitrostack import tool, ExecutionContext
+TOOL_TEMPLATE = """from nitrostack import tool, widget, ExecutionContext
 from pydantic import BaseModel
 
 class {camel_name}Input(BaseModel):
@@ -825,10 +827,143 @@ class {camel_name}Input(BaseModel):
     description="Implement your tool description here",
     input_schema={camel_name}Input
 )
+@widget("{name}")
 async def {name}_handler(input: {camel_name}Input, context: ExecutionContext):
     context.logger.info("Executing tool {name}")
     return {{"status": "success"}}
 """
+
+WIDGET_PREVIEW_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Widget preview</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    iframe { width: 100%; height: 380px; border: 1px solid #ddd; border-radius: 8px; }
+    button { margin: 0 8px 12px 0; }
+    textarea { width: 100%; height: 110px; font-family: ui-monospace, monospace; }
+    .note { color: #475569; font-size: 0.9rem; max-width: 820px; line-height: 1.45; }
+  </style>
+</head>
+<body>
+  <p class="note">
+    This static file does <strong>not</strong> follow MCP Inspector tool calls.
+    Inspector JSON is the live result (e.g. all matching pizza shops). Open
+    <code>http://localhost:3000/widgets/preview</code> with the server running to
+    render that same output, or paste <code>structuredContent</code> below and Inject.
+  </p>
+  <div id="buttons"></div>
+  <textarea id="json">__DEFAULT_JSON__</textarea>
+  <p><button id="inject">Inject JSON into iframe</button></p>
+  <iframe id="frame" src="out/__FIRST__.html"></iframe>
+  <script>
+    const routes = __ROUTES__;
+    const buttons = document.getElementById("buttons");
+    const frame = document.getElementById("frame");
+    routes.forEach((route) => {
+      const b = document.createElement("button");
+      b.textContent = route;
+      b.onclick = () => { frame.src = "out/" + route + ".html"; };
+      buttons.appendChild(b);
+    });
+    function inject() {
+      let data = {};
+      try { data = JSON.parse(document.getElementById("json").value); } catch (e) { alert("Invalid JSON"); return; }
+      const win = frame.contentWindow;
+      if (!win) return;
+      const payload = { structuredContent: data };
+      try {
+        win.openai = Object.assign(win.openai || {}, { toolOutput: payload });
+        win.dispatchEvent(new CustomEvent("openai:set_globals", { detail: { globals: { toolOutput: payload } } }));
+      } catch (e) {}
+      win.postMessage({ type: "setGlobals", globals: { toolOutput: payload } }, "*");
+      win.postMessage({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: payload }, "*");
+    }
+    document.getElementById("inject").onclick = inject;
+    frame.addEventListener("load", () => setTimeout(inject, 80));
+  </script>
+</body>
+</html>
+"""
+
+SAMPLE_PIZZA_PREVIEW_JSON = """{
+  "shops": [
+    {
+      "id": "tonys-pizza",
+      "name": "Tony's New York Pizza",
+      "address": "123 Main St, San Francisco, CA 94102",
+      "rating": 4.5,
+      "priceLevel": 2,
+      "openNow": true,
+      "image": "https://images.unsplash.com/photo-1513104890138-7c749659a591"
+    }
+  ],
+  "totalShops": 1
+}"""
+
+
+def write_widget_html(project_dir: str, route: str, *, overwrite: bool = False) -> str:
+    """Write ``widgets/out/{route}.html`` if missing (Python-only static widget)."""
+    from nitrostack.widgets.route_templates import build_widget_html_for_route
+
+    route = (route or "").strip()
+    if not route:
+        raise ValueError("widget route must not be empty")
+    out_dir = os.path.join(project_dir, "widgets", "out")
+    os.makedirs(out_dir, exist_ok=True)
+    dest = os.path.join(out_dir, f"{route}.html")
+    if overwrite or not os.path.exists(dest):
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(build_widget_html_for_route(route))
+    return dest
+
+
+def write_widget_preview(project_dir: str) -> None:
+    out_dir = os.path.join(project_dir, "widgets", "out")
+    if not os.path.isdir(out_dir):
+        return
+    routes = sorted(p[:-5] for p in os.listdir(out_dir) if p.endswith(".html"))
+    if not routes:
+        return
+    first = "pizza-list" if "pizza-list" in routes else routes[0]
+    default_json = '{"status":"success"}'
+    if "pizza-list" in routes or "pizza-map" in routes:
+        default_json = SAMPLE_PIZZA_PREVIEW_JSON
+    html = (
+        WIDGET_PREVIEW_HTML.replace("__FIRST__", first)
+        .replace("__ROUTES__", "[" + ", ".join(f'"{r}"' for r in routes) + "]")
+        .replace("__DEFAULT_JSON__", default_json)
+    )
+    dest = os.path.join(project_dir, "widgets", "preview.html")
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(html)
+
+
+def ensure_python_widgets(project_dir: str) -> list:
+    """Create missing ``widgets/out/{route}.html`` for every ``@widget`` in the project."""
+    routes = []
+    for root, _dirs, files in os.walk(project_dir):
+        parts = set(root.split(os.sep))
+        if "node_modules" in parts or ".venv" in parts:
+            continue
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(root, name)
+            try:
+                text = Path(path).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            routes.extend(re.findall(r'@widget\(\s*["\']([^"\']+)["\']', text))
+            routes.extend(re.findall(r'WidgetOptions\(\s*route\s*=\s*["\']([^"\']+)["\']', text))
+    unique = []
+    for route in routes:
+        if route not in unique:
+            unique.append(route)
+        write_widget_html(project_dir, route, overwrite=False)
+    write_widget_preview(project_dir)
+    return unique
 
 MODULE_TEMPLATE = """from nitrostack import module
 
@@ -1069,7 +1204,11 @@ def init_project(name: str = None, template: str = None, skip_install: bool = Fa
         sys.exit(1)
 
     shutil.copytree(template_src_dir, name)
+    widget_routes = ensure_python_widgets(name)
     print("\n\033[32m✓\033[0m Project created")
+    if widget_routes:
+        print(f"\033[32m✓\033[0m Python widgets: {', '.join(widget_routes)}")
+        print("    HTML in widgets/out/ — preview: widgets/preview.html")
 
     # 7. Update .env file
     env_path = os.path.join(name, ".env")
@@ -1092,6 +1231,7 @@ def init_project(name: str = None, template: str = None, skip_install: bool = Fa
             new_lines.append(f'SERVER_AUTHOR="{author}"\n')
         new_lines = _upsert_env_var(new_lines, "PORT", mcp_port)
         new_lines = _upsert_env_var(new_lines, "WIDGETS_DEV_PORT", widgets_port)
+        new_lines = _upsert_env_var(new_lines, "NITROSTACK_APP_MODE", "universal")
         with open(env_path, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
 
@@ -1151,6 +1291,14 @@ def init_project(name: str = None, template: str = None, skip_install: bool = Fa
     else:
         print(" 2. Configure environment variables in \033[34m.env\033[0m")
     print(" 3. Start development server: \033[34mnitrostack-py dev\033[0m (or `python -m nitrostack.cli.main dev`)")
+    print(" 4. Preview widgets: \033[34mhttp://localhost:3000/widgets/preview\033[0m (server running)")
+    print("    Static file (manual JSON): \033[34mopen widgets/preview.html\033[0m")
+    print(" 5. Inspector (HTTP): \033[34mMCP_TRANSPORT_TYPE=http MCP_STATELESS=true NITROSTACK_APP_MODE=universal python main.py\033[0m")
+    print("    Connect Streamable HTTP to \033[34mhttp://localhost:3000/mcp\033[0m with \033[34mAuthentication = Off\033[0m")
+    print("    Apps tab renders the widget from live \033[34mstructuredContent\033[0m (not widgets/preview.html)")
+    print("    For open shops only set \033[34mopenNow=true\033[0m (list) or \033[34mfilter=open_now\033[0m (map)")
+    print(" 6. NitroStudio cannot folder-connect a Python project (it looks for @nitrostack/core).")
+    print("    Use Inspector HTTP as above, or Studio's custom MCP URL if it offers Streamable HTTP.")
     print("\nHappy coding! 🚀\n")
 
 def run_dev(port=None, widget=None):
@@ -1339,7 +1487,10 @@ def generate_tool(name: str):
     content = TOOL_TEMPLATE.format(name=name, camel_name=camel_name)
     with open(filename, "w", encoding="utf-8") as f:
         f.write(content)
+    html_path = write_widget_html(".", name, overwrite=False)
+    write_widget_preview(".")
     print(f"Generated tool boilerplate in '{filename}'")
+    print(f"Generated widget HTML in '{html_path}'")
 
 def generate_module(name: str):
     filename = f"{name}_module.py"

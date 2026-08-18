@@ -1,5 +1,10 @@
 # OAuth 2.1 Server Setup Guide
 
+The TypeScript SDK only enforces OAuth when `OAUTH_REQUIRED=true`. Python now
+matches that: **Studio and Inspector work without a token** against mock Duffel
+flights (`DUFFEL_API_KEY=your-duffel-api-key`). Set `OAUTH_REQUIRED=true` only
+when you want real Bearer-token checks.
+
 To run your flight booking MCP server with OAuth 2.1 protection, you need to configure an OAuth authorization server (like Keycloak, Auth0, Hydra, or a local mock OAuth server).
 
 ## 1. Local Configuration

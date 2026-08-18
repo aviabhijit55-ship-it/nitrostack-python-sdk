@@ -1,6 +1,20 @@
 from nitrostack import injectable
 from modules.pizzaz.pizzaz_data import PIZZA_SHOPS
 
+
+def _as_bool(value):
+    """Inspector checkboxes sometimes send \"true\"/\"false\" strings."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "1", "yes"):
+            return True
+        if lowered in ("false", "0", "no", ""):
+            return False
+    return value
+
+
 @injectable()
 class PizzazService:
     def get_all_shops(self):
@@ -13,15 +27,22 @@ class PizzazService:
         return None
 
     def get_shops_filtered(self, filters: dict):
-        shops = PIZZA_SHOPS
-        if filters.get("openNow"):
-            shops = [shop for shop in shops if shop["openNow"]]
+        # Match the TypeScript SDK: copy then apply each filter.
+        shops = list(PIZZA_SHOPS)
+        if not filters:
+            return shops
+        if "openNow" in filters and filters.get("openNow") is not None:
+            open_now = _as_bool(filters.get("openNow"))
+            if open_now is True:
+                shops = [shop for shop in shops if shop["openNow"]]
+            elif open_now is False:
+                shops = [shop for shop in shops if not shop["openNow"]]
         if filters.get("minRating") is not None:
             shops = [shop for shop in shops if shop["rating"] >= filters["minRating"]]
         if filters.get("maxPrice") is not None:
             shops = [shop for shop in shops if shop["priceLevel"] <= filters["maxPrice"]]
         if filters.get("cuisine"):
-            cuisine_lower = filters["cuisine"].lower()
+            cuisine_lower = str(filters["cuisine"]).lower()
             shops = [
                 shop for shop in shops
                 if any(cuisine_lower in c.lower() for c in shop["cuisine"])

@@ -9,6 +9,15 @@ import threading
 from nitrostack.core.module import module
 from nitrostack.core.di import DIContainer
 
+
+def is_oauth_required() -> bool:
+    """TS ``OAuthModule.isAuthRequired()`` — Studio/local default is off.
+
+    Set ``OAUTH_REQUIRED=true`` to enforce Bearer tokens. Unset/false lets
+    NitroStudio and Inspector call tools against mock Duffel data.
+    """
+    return (os.environ.get("OAUTH_REQUIRED") or "").strip().lower() == "true"
+
 class OAuthService:
     def __init__(
         self,
@@ -206,3 +215,7 @@ class OAuthModule:
         )
         DIContainer.get_instance().register_value(OAuthService, service)
         return cls
+
+    @staticmethod
+    def is_auth_required() -> bool:
+        return is_oauth_required()

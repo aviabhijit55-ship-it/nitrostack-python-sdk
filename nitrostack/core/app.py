@@ -6,7 +6,9 @@ import uuid
 import asyncio
 import inspect
 import datetime
+import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Pattern, Set, Tuple, Type
 
 import mcp.types as types
@@ -16,7 +18,8 @@ from mcp.server.stdio import stdio_server
 from pydantic import BaseModel, create_model
 
 from nitrostack.core.context import ExecutionContext, TaskContext
-from nitrostack.core.decorators import ToolConfig, ResourceConfig, PromptConfig, _apply_widget_metadata
+from nitrostack.core.decorators import ToolConfig, ResourceConfig, PromptConfig, widget_resource_uri
+from nitrostack.core.app_mode import get_app_mode, get_widget_mime_type, is_mcp_app_mode, is_openai_mode
 from nitrostack.core.di import DIContainer
 from nitrostack.core.errors import (
     PromptNotFoundError,
@@ -30,9 +33,13 @@ from nitrostack.core.pipeline import run_pipeline
 from nitrostack.core.additional_decorators import HealthCheckRegistry
 from nitrostack.core.task import TaskManager, TaskStatus
 from nitrostack.events.event_emitter import EventEmitter
+from nitrostack.widgets.component import Component, find_project_root, load_widget_html, parse_widget_options
+from nitrostack.widgets.mcp_meta import build_call_tool_result_meta, build_tool_list_meta, resource_read_contents_meta
+from nitrostack.widgets.route_templates import build_missing_widget
 
 
 DEFAULT_HTTP_PORT = 3000
+logger = logging.getLogger(__name__)
 
 
 def resolve_http_port() -> int:
@@ -150,11 +157,47 @@ def inspector_friendly_schema(node: Any) -> Any:
     return {key: inspector_friendly_schema(value) for key, value in unwrapped.items()}
 
 
+def tool_json_schema(schema_spec: Any) -> Optional[Dict[str, Any]]:
+    """Convert a Pydantic model class or JSON-schema dict to Inspector-friendly schema."""
+    if schema_spec is None:
+        return None
+    if isinstance(schema_spec, dict):
+        return inspector_friendly_schema(schema_spec)
+    model = get_pydantic_model(schema_spec)
+    if model is not None:
+        return inspector_friendly_schema(model.model_json_schema())
+    return None
+
+
+def _is_blank_inspector_value(value: Any) -> bool:
+    """Inspector leaves unused form fields as ``""`` (or whitespace)."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _omit_blank_optional_fields(payload: Dict[str, Any], input_model: Type[BaseModel]) -> Dict[str, Any]:
+    """Drop blank optional/defaulted fields so Pydantic defaults apply.
+
+    MCP Inspector sends ``filter: ""`` when the enum is left empty. Zod in the
+    TS SDK marks that field ``.optional()`` and then uses ``args.filter || 'all'``.
+    Pydantic ``default='all'`` only runs when the key is missing, not when it is
+    an empty string — so we omit blanks for non-required fields.
+    """
+    fields = getattr(input_model, "model_fields", {}) or {}
+    cleaned: Dict[str, Any] = {}
+    for key, value in payload.items():
+        field = fields.get(key)
+        if field is not None and (not field.is_required()) and _is_blank_inspector_value(value):
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
 def parse_tool_input(input_model: Type[BaseModel], arguments: Optional[Dict[str, Any]]) -> BaseModel:
     """Validate tool arguments from Inspector or the older nested wrap.
 
     Inspector sends top-level fields (`{openNow: true}`).
     Older Python clients wrap them (`{input: {openNow: true}}`).
+    Empty strings on optional fields are treated as omitted (Inspector dropdowns).
     """
     arguments = arguments or {}
     inner = arguments.get("input")
@@ -164,7 +207,9 @@ def parse_tool_input(input_model: Type[BaseModel], arguments: Optional[Dict[str,
         and "input" not in input_model.model_fields
     )
     payload = inner if looks_wrapped else arguments
-    return input_model.model_validate(payload)
+    if not isinstance(payload, dict):
+        payload = {}
+    return input_model.model_validate(_omit_blank_optional_fields(payload, input_model))
 
 
 @dataclass
@@ -173,6 +218,7 @@ class _ToolEntry:
     input_model: Type[BaseModel]
     instance: Any
     method: Callable
+    component: Optional[Component] = None
 
 
 @dataclass
@@ -182,6 +228,7 @@ class _ResourceEntry:
     method: Callable
     param_names: List[str] = field(default_factory=list)
     pattern: Optional[Pattern] = None
+    component: Optional[Component] = None
 
 
 @dataclass
@@ -297,9 +344,61 @@ class McpApplication:
     def _register_tool(self, instance: Any, method: Callable, tool_config: ToolConfig) -> None:
         input_model = get_pydantic_model(tool_config.input_schema)
         entry = _ToolEntry(config=tool_config, input_model=input_model, instance=instance, method=method)
+
+        widget_spec = getattr(method, "_mcp_widget", None)
+        if widget_spec is not None:
+            options = parse_widget_options(widget_spec)
+            resource_uri = widget_resource_uri(options.route)
+            route_id = resource_uri.removeprefix("ui://widget/").removesuffix(".html")
+            from_file = None
+            method_module = inspect.getmodule(method)
+            if method_module and getattr(method_module, "__file__", None):
+                from_file = Path(method_module.__file__).resolve()
+            project_root = find_project_root(from_file)
+            html = load_widget_html(
+                route_id,
+                html=options.html,
+                from_file=from_file,
+                project_root=project_root,
+            )
+            if not html:
+                html = build_missing_widget(route_id)
+            component = Component(
+                id=route_id,
+                name=tool_config.title or tool_config.name,
+                html=html,
+                description=options.description or tool_config.description,
+                css=options.css,
+                js=options.js,
+                csp=options.csp,
+                domain=options.domain,
+                prefers_border=options.prefers_border,
+                can_invoke_tools=options.can_invoke_tools,
+            )
+            entry.component = component
+            self._register_widget_resource(component)
+
         self._tools[tool_config.name] = entry
         if tool_config.is_initial:
             self._initial_tools.append((instance, method, tool_config))
+
+    def _register_widget_resource(self, component: Component) -> None:
+        config = ResourceConfig(
+            uri=component.resource_uri,
+            name=component.name,
+            description=component.description or f"UI widget for {component.name}",
+            mime_type=get_widget_mime_type(),
+        )
+
+        async def widget_resource_handler(context: ExecutionContext) -> str:
+            return component.get_bundle()
+
+        self._resources[config.uri] = _ResourceEntry(
+            config=config,
+            instance=None,
+            method=widget_resource_handler,
+            component=component,
+        )
 
     def _register_resource(self, instance: Any, method: Callable, resource_config: ResourceConfig) -> None:
         param_names = re.findall(r"\{([^}]+)\}", resource_config.uri)
@@ -417,12 +516,18 @@ class McpApplication:
             "task_support": cfg.task_support,
             **(cfg.metadata or {}),
         }
-        widget_route = getattr(entry.method, "_mcp_widget", None)
-        if widget_route:
-            _apply_widget_metadata(meta, widget_route)
-        if cfg.invocation:
+
+        if entry.component is not None:
+            widget_meta = build_tool_list_meta(
+                entry.component,
+                cfg.visibility,
+                cfg.invocation,
+            )
+            meta.update(widget_meta)
+        elif cfg.invocation and is_openai_mode():
             meta["openai/toolInvocation/invoking"] = cfg.invocation.invoking
             meta["openai/toolInvocation/invoked"] = cfg.invocation.invoked
+
         if cfg.examples:
             meta["examples"] = {
                 "input": cfg.examples.input,
@@ -430,16 +535,13 @@ class McpApplication:
                 "description": cfg.examples.description,
             }
 
-        app_mode = os.environ.get("NITROSTACK_APP_MODE", "mcp")
-        if app_mode == "openai":
+        if is_openai_mode():
             meta["openai/type"] = "function"
             meta["openai/function"] = {
                 "name": cfg.name,
                 "description": cfg.description,
                 "parameters": input_schema,
             }
-        elif app_mode == "mcpapps":
-            meta["_meta"] = {"ui": {"title": cfg.title or cfg.name, "description": cfg.description}}
 
         annotations = types.ToolAnnotations(
             readOnlyHint=cfg.annotations.read_only_hint,
@@ -452,15 +554,23 @@ class McpApplication:
         if cfg.task_support and cfg.task_support != "forbidden":
             execution = types.ToolExecution(taskSupport=cfg.task_support)
 
-        return types.Tool(
-            name=cfg.name,
-            title=cfg.title,
-            description=cfg.description,
-            inputSchema=input_schema,
-            annotations=annotations,
-            execution=execution,
-            **{"_meta": meta},
-        )
+        tool_kwargs: Dict[str, Any] = {
+            "name": cfg.name,
+            "title": cfg.title,
+            "description": cfg.description,
+            "inputSchema": input_schema,
+            "annotations": annotations,
+            "execution": execution,
+            "_meta": meta,
+        }
+        if entry.component is not None and is_openai_mode():
+            tool_kwargs["outputTemplate"] = entry.component.resource_uri
+
+        output_schema = tool_json_schema(cfg.output_schema)
+        if output_schema is not None:
+            tool_kwargs["outputSchema"] = output_schema
+
+        return types.Tool(**tool_kwargs)
 
     def _build_resource_definition(self, entry: _ResourceEntry) -> types.Resource:
         cfg = entry.config
@@ -504,24 +614,83 @@ class McpApplication:
             getattr(method, "_mcp_filters", []),
         )
 
-    @staticmethod
-    def _to_call_tool_result(result: Any) -> types.CallToolResult:
+    def _to_call_tool_result(
+        self,
+        result: Any,
+        component: Optional[Component] = None,
+        context: Optional[ExecutionContext] = None,
+    ) -> types.CallToolResult:
         if isinstance(result, types.CallToolResult):
+            if component is not None and result.meta is None:
+                result = result.model_copy(
+                    update={"_meta": build_call_tool_result_meta(component, result.meta)}
+                )
             return result
         if isinstance(result, BaseModel):
             result = result.model_dump()
-        if isinstance(result, dict):
-            if "content" in result and "isError" in result:
-                return types.CallToolResult(**result)
+
+        structured: Any = result
+        result_meta: Optional[Dict[str, Any]] = None
+
+        if component is not None:
+            if component.transformer is not None:
+                structured = component.transformer(result, context)
+            if component.meta_transformer is not None:
+                result_meta = component.meta_transformer(result, context) or {}
+            if isinstance(structured, BaseModel):
+                structured = structured.model_dump()
+
+        if isinstance(result, dict) and "content" in result and "isError" in result:
+            call_result = types.CallToolResult(**result)
+            if component is not None:
+                call_result = call_result.model_copy(
+                    update={"_meta": build_call_tool_result_meta(component, call_result.meta)}
+                )
+            return call_result
+
+        if isinstance(structured, dict):
+            widget_meta = build_call_tool_result_meta(component, result_meta) if component else result_meta
             return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))],
-                structuredContent=result,
+                content=self._widget_result_content(structured, component),
+                structuredContent=structured,
+                **({"_meta": widget_meta} if widget_meta else {}),
                 isError=False,
             )
+
         return types.CallToolResult(
-            content=[types.TextContent(type="text", text=str(result))],
+            content=[types.TextContent(type="text", text=str(structured))],
             isError=False,
         )
+
+    def _widget_result_content(self, structured: Dict[str, Any], component: Optional[Component]) -> List[Any]:
+        """Text fallback plus data-filled HTML so Inspector/Studio can paint the live result."""
+        content: List[Any] = [
+            types.TextContent(type="text", text=json.dumps(structured, indent=2, default=str)),
+        ]
+        if component is None:
+            return content
+        mime = get_widget_mime_type()
+        filled = component.html_with_data(structured)
+        content.append(
+            types.EmbeddedResource(
+                type="resource",
+                resource=types.TextResourceContents(
+                    uri=component.resource_uri,
+                    mimeType=mime,
+                    text=filled,
+                ),
+            )
+        )
+        content.append(
+            types.ResourceLink(
+                type="resource_link",
+                uri=component.resource_uri,
+                name=component.name,
+                description=component.description,
+                mimeType=mime,
+            )
+        )
+        return content
 
     async def _call_tool(self, name: str, arguments: Dict[str, Any]):
         entry = self._tools.get(name)
@@ -590,7 +759,7 @@ class McpApplication:
                         param_type=entry.input_model,
                     )
                     self.task_manager.complete_task(
-                        task_id, self._to_call_tool_result(result)
+                        task_id, self._to_call_tool_result(result, entry.component, task_ctx)
                     )
                 except Exception as e:
                     try:
@@ -617,7 +786,7 @@ class McpApplication:
             param_name="input",
             param_type=entry.input_model,
         )
-        return self._to_call_tool_result(result)
+        return self._to_call_tool_result(result, entry.component, ctx)
 
     async def _read_resource(self, uri: str) -> List[ReadResourceContents]:
         entry = self._resources.get(uri)
@@ -633,6 +802,15 @@ class McpApplication:
 
         if entry is None:
             raise ResourceNotFoundError(uri)
+
+        if entry.component is not None:
+            return [
+                ReadResourceContents(
+                    content=entry.component.get_bundle(),
+                    mime_type=get_widget_mime_type(),
+                    meta=resource_read_contents_meta(entry.component),
+                )
+            ]
 
         cfg = entry.config
         ctx = ExecutionContext(request_id=str(uuid.uuid4()), metadata=dict(path_kwargs))
