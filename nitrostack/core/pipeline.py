@@ -181,6 +181,10 @@ class OAuthGuard:
             raise
         except Exception as e:
             context.logger.error(f"OAuth Guard validation failed: {e}")
+            if not required:
+                context.logger.warning(
+                    "OAuth validation failed but OAUTH_REQUIRED is off; allowing the request"
+                )
             return not required
 
 

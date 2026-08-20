@@ -637,6 +637,7 @@ def test_delete_terminates_live_session_and_404s_unknown_one():
 
 def test_oauth_register_returns_json_not_html():
     """Inspector Auth-on DCR hits POST /register; HTML 404s parse as invalid OAuth JSON."""
+    DIContainer.reset()
     app = asyncio.run(_build_app())
     http_app = build_http_app(app, enable_cors=True, stateless=True)
     with TestClient(http_app) as client:
@@ -649,6 +650,36 @@ def test_oauth_register_returns_json_not_html():
         well_known = client.get("/.well-known/oauth-authorization-server")
         assert well_known.status_code == 404
         assert well_known.json()["error"] == "invalid_request"
+
+
+def test_oauth_configured_skips_not_supported_stubs():
+    """Real OAuthModule must not be shadowed by Inspector 'this server does not use OAuth' JSON."""
+    from nitrostack.auth.oauth import OAuthModule
+
+    DIContainer.reset()
+    OAuthModule.for_root(
+        resource_uri="http://localhost:3000/mcp",
+        authorization_servers=["http://localhost:3000/oauth"],
+        scopes_supported=["read"],
+    )
+    try:
+        app = asyncio.run(_build_app())
+        http_app = build_http_app(app, enable_cors=True, stateless=True)
+        with TestClient(http_app) as client:
+            well_known = client.get("/.well-known/oauth-protected-resource")
+            assert well_known.status_code == 404
+            ctype = well_known.headers.get("content-type", "")
+            if "json" in ctype:
+                assert "does not use OAuth" not in well_known.json().get("error_description", "")
+            else:
+                assert "does not use OAuth" not in well_known.text
+            register = client.post("/register", json={"client_name": "inspector"})
+            assert register.status_code == 404
+            if "json" in register.headers.get("content-type", ""):
+                body = register.json()
+                assert body.get("error_description") is None or "does not use OAuth" not in body["error_description"]
+    finally:
+        DIContainer.reset()
 
 
 if __name__ == "__main__":
@@ -667,4 +698,5 @@ if __name__ == "__main__":
     test_unsupported_protocol_version_header_does_not_fail_request()
     test_delete_terminates_live_session_and_404s_unknown_one()
     test_oauth_register_returns_json_not_html()
+    test_oauth_configured_skips_not_supported_stubs()
     print("\nAll Phase 3 transport tests passed successfully!")

@@ -162,8 +162,12 @@ function __nitrostack_callTool(name, args) {
     return result;
   });
 }
+function __nitrostack_isSafeUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  return /^(https?|mailto|tel):/i.test(url.trim());
+}
 function __nitrostack_openLink(url) {
-  if (!url) return;
+  if (!__nitrostack_isSafeUrl(url)) return;
   if (window.openai && typeof window.openai.openExternal === "function") {
     window.openai.openExternal({ href: url });
     return;

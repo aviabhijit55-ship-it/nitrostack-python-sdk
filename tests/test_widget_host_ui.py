@@ -30,6 +30,8 @@ def test_host_bridge_exposes_mcp_and_openai_rpcs():
     assert "window.openai.requestDisplayMode" in HOST_BRIDGE_JS
     assert "window.openai.setWidgetState" in HOST_BRIDGE_JS
     assert "window.nitrostack" in HOST_BRIDGE_JS
+    assert "__nitrostack_isSafeUrl" in HOST_BRIDGE_JS
+    assert "/^(https?|mailto|tel):/i.test" in HOST_BRIDGE_JS
 
 
 def test_pizza_list_cards_call_show_shop():
@@ -94,6 +96,9 @@ def test_maps_and_phone_helpers():
     assert "Maps" in row
     assert "Call" in row
     assert "Website" in row
+    unsafe = action_row(website="javascript:alert(1)")
+    assert "javascript:" not in unsafe
+    assert "Website" not in unsafe
 
 
 def test_flight_search_cards_call_details():

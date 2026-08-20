@@ -79,10 +79,17 @@ def esc(value: Any) -> str:
     return html.escape(str(value), quote=True)
 
 
-def json_script(data: Any) -> str:
+def json_for_inline_script(data: Any) -> str:
+    """JSON safe to embed in a ``<script>`` block (escapes ``</``)."""
     payload = "null" if data is None else json.dumps(data, default=str)
-    payload = payload.replace("</", "<\\/")
-    return f'<script type="application/json" id="nitrostack-tool-data">{payload}</script>'
+    return payload.replace("</", "<\\/")
+
+
+def json_script(data: Any) -> str:
+    return (
+        '<script type="application/json" id="nitrostack-tool-data">'
+        f"{json_for_inline_script(data)}</script>"
+    )
 
 
 def inject_tool_data(html_doc: str, data: Any) -> str:

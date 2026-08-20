@@ -909,16 +909,50 @@ SAMPLE_PIZZA_PREVIEW_JSON = """{
 }"""
 
 
+_GENERATE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_WIDGET_ROUTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def _validate_generate_name(name: str) -> str:
+    """Reject path segments so ``generate tool ../../ESCAPED`` cannot write outside cwd."""
+    name = (name or "").strip()
+    if not name or os.path.basename(name) != name or ".." in name or not _GENERATE_NAME_RE.fullmatch(name):
+        raise ValueError(
+            "name must be a Python identifier (letters, digits, underscore) "
+            "and cannot contain path separators"
+        )
+    return name
+
+
+def _sanitize_widget_route(route: str) -> str:
+    route = (route or "").strip()
+    if not route or os.path.basename(route) != route or ".." in route or not _WIDGET_ROUTE_RE.fullmatch(route):
+        raise ValueError("widget route must be a single alphanumeric path segment")
+    return route
+
+
+def _assert_dest_inside_root(dest: str, root: str) -> str:
+    dest_abs = os.path.realpath(dest)
+    root_abs = os.path.realpath(root)
+    try:
+        common = os.path.commonpath([dest_abs, root_abs])
+    except ValueError as exc:
+        raise ValueError("generated path would escape the project directory") from exc
+    if common != root_abs:
+        raise ValueError("generated path would escape the project directory")
+    return dest_abs
+
+
 def write_widget_html(project_dir: str, route: str, *, overwrite: bool = False) -> str:
     """Write ``widgets/out/{route}.html`` if missing (Python-only static widget)."""
     from nitrostack.widgets.route_templates import build_widget_html_for_route
 
-    route = (route or "").strip()
-    if not route:
-        raise ValueError("widget route must not be empty")
+    route = _sanitize_widget_route(route)
+    project_dir = os.path.abspath(project_dir or ".")
     out_dir = os.path.join(project_dir, "widgets", "out")
     os.makedirs(out_dir, exist_ok=True)
     dest = os.path.join(out_dir, f"{route}.html")
+    _assert_dest_inside_root(dest, project_dir)
     if overwrite or not os.path.exists(dest):
         with open(dest, "w", encoding="utf-8") as f:
             f.write(build_widget_html_for_route(route))
@@ -926,6 +960,10 @@ def write_widget_html(project_dir: str, route: str, *, overwrite: bool = False) 
 
 
 def write_widget_preview(project_dir: str) -> None:
+    from html import escape as html_escape
+
+    from nitrostack.widgets.html_util import json_for_inline_script
+
     out_dir = os.path.join(project_dir, "widgets", "out")
     if not os.path.isdir(out_dir):
         return
@@ -933,13 +971,15 @@ def write_widget_preview(project_dir: str) -> None:
     if not routes:
         return
     first = "pizza-list" if "pizza-list" in routes else routes[0]
-    default_json = '{"status":"success"}'
+    default_payload: dict = {"status": "success"}
     if "pizza-list" in routes or "pizza-map" in routes:
-        default_json = SAMPLE_PIZZA_PREVIEW_JSON
+        import json as json_lib
+
+        default_payload = json_lib.loads(SAMPLE_PIZZA_PREVIEW_JSON)
     html = (
-        WIDGET_PREVIEW_HTML.replace("__FIRST__", first)
-        .replace("__ROUTES__", "[" + ", ".join(f'"{r}"' for r in routes) + "]")
-        .replace("__DEFAULT_JSON__", default_json)
+        WIDGET_PREVIEW_HTML.replace("__FIRST__", html_escape(first, quote=True))
+        .replace("__ROUTES__", json_for_inline_script(routes))
+        .replace("__DEFAULT_JSON__", html_escape(json_for_inline_script(default_payload), quote=False))
     )
     dest = os.path.join(project_dir, "widgets", "preview.html")
     with open(dest, "w", encoding="utf-8") as f:
@@ -967,7 +1007,10 @@ def ensure_python_widgets(project_dir: str) -> list:
     for route in routes:
         if route not in unique:
             unique.append(route)
-        write_widget_html(project_dir, route, overwrite=False)
+        try:
+            write_widget_html(project_dir, route, overwrite=False)
+        except ValueError:
+            continue
     write_widget_preview(project_dir)
     return unique
 
@@ -1485,7 +1528,18 @@ def run_start(port=None, widget=None):
                 pass
 
 def generate_tool(name: str):
+    try:
+        name = _validate_generate_name(name)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
     filename = f"{name}_tool.py"
+    dest_py = os.path.abspath(filename)
+    try:
+        _assert_dest_inside_root(dest_py, os.getcwd())
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
     if os.path.exists(filename):
         print(f"Error: File '{filename}' already exists.")
         sys.exit(1)
@@ -1493,7 +1547,11 @@ def generate_tool(name: str):
     content = TOOL_TEMPLATE.format(name=name, camel_name=camel_name)
     with open(filename, "w", encoding="utf-8") as f:
         f.write(content)
-    html_path = write_widget_html(".", name, overwrite=False)
+    try:
+        html_path = write_widget_html(".", name, overwrite=False)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
     write_widget_preview(".")
     print(f"Generated tool boilerplate in '{filename}'")
     print(f"Generated widget HTML in '{html_path}'")

@@ -145,7 +145,9 @@ PREVIEW_PAGE_HTML = """<!DOCTYPE html>
       }
       if (msg.method === "ui/open-link") {
         const url = (msg.params && msg.params.url) || "";
-        if (url) window.open(url, "_blank", "noopener");
+        if (/^(https?|mailto|tel):/i.test(String(url).trim())) {
+          window.open(url, "_blank", "noopener");
+        }
         reply(msg.id, {});
         return;
       }
@@ -167,6 +169,6 @@ PREVIEW_PAGE_HTML = """<!DOCTYPE html>
 
 
 def render_preview_page(tools: list) -> str:
-    import json
+    from nitrostack.widgets.html_util import json_for_inline_script
 
-    return PREVIEW_PAGE_HTML.replace("__TOOLS__", json.dumps(tools))
+    return PREVIEW_PAGE_HTML.replace("__TOOLS__", json_for_inline_script(tools))

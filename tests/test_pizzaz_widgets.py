@@ -187,6 +187,13 @@ def test_live_http_widget_preview_calls_tool():
         assert "Pizza shops" in body["html"]
         missing = client.post("/widgets/preview/call", json={"tool": "nope", "arguments": {}})
         assert missing.status_code == 404
+        bad_json = client.post(
+            "/widgets/preview/call",
+            content=b"not-json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert bad_json.status_code == 400
+        assert "Invalid JSON" in bad_json.json()["error"]
 
 
 def _load_template_pizzaz(module_name: str):
@@ -217,9 +224,11 @@ def test_pizzaz_open_now_filter_excludes_closed_shops():
     as_string = service.get_shops_filtered({"openNow": "true"})
     assert [s["id"] for s in as_string] == [s["id"] for s in opened]
 
-    closed = service.get_shops_filtered({"openNow": False})
-    assert closed
-    assert all(not shop["openNow"] for shop in closed)
+    closed_or_all = service.get_shops_filtered({"openNow": False})
+    # False / empty / "false" means "don't care" — all shops, not closed-only.
+    assert [s["id"] for s in closed_or_all] == [s["id"] for s in all_shops]
+    assert [s["id"] for s in service.get_shops_filtered({"openNow": ""})] == [s["id"] for s in all_shops]
+    assert [s["id"] for s in service.get_shops_filtered({"openNow": "false"})] == [s["id"] for s in all_shops]
 
 
 def test_show_pizza_map_blank_filter_returns_all_shops():

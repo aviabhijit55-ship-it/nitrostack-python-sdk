@@ -32,11 +32,10 @@ class PizzazService:
         if not filters:
             return shops
         if "openNow" in filters and filters.get("openNow") is not None:
-            open_now = _as_bool(filters.get("openNow"))
-            if open_now is True:
+            # True → open shops only. False / empty / "false" → no filter (all shops).
+            # A model passing openNow=false to mean "I don't care" must not get closed-only.
+            if _as_bool(filters.get("openNow")) is True:
                 shops = [shop for shop in shops if shop["openNow"]]
-            elif open_now is False:
-                shops = [shop for shop in shops if not shop["openNow"]]
         if filters.get("minRating") is not None:
             shops = [shop for shop in shops if shop["rating"] >= filters["minRating"]]
         if filters.get("maxPrice") is not None:

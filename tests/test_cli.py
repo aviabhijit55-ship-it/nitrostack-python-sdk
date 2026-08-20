@@ -701,6 +701,33 @@ def test_generate_tool_and_module():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_generate_tool_rejects_path_traversal():
+    from nitrostack.cli.main import write_widget_html
+
+    tmp = tempfile.mkdtemp(prefix="nitro-cli-gen-safe-")
+    original_cwd = os.getcwd()
+    try:
+        os.chdir(tmp)
+        try:
+            generate_tool("../../ESCAPED")
+            raise AssertionError("path traversal generate_tool should exit")
+        except SystemExit:
+            pass
+        assert not os.path.isfile(os.path.join(tmp, "ESCAPED_tool.py"))
+        parent = os.path.abspath(os.path.join(tmp, "..", ".."))
+        assert "ESCAPED_tool.py" not in os.listdir(parent)
+        try:
+            write_widget_html(tmp, "../../ESCAPED")
+            raise AssertionError("path traversal write_widget_html should raise")
+        except ValueError:
+            pass
+        assert not os.path.isfile(os.path.join(tmp, "widgets", "out", "ESCAPED.html"))
+        print("Success! generate_tool rejects path traversal.")
+    finally:
+        os.chdir(original_cwd)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_get_claude_config_paths_by_platform():
     from unittest.mock import patch
 
@@ -1363,6 +1390,7 @@ if __name__ == "__main__":
     test_run_dev_passes_port_overrides_and_starts_widgets()
     test_run_start_passes_port_overrides()
     test_generate_tool_and_module()
+    test_generate_tool_rejects_path_traversal()
     test_get_claude_config_paths_by_platform()
     test_register_server_writes_config_and_handles_errors()
     test_main_dispatches_commands()

@@ -621,9 +621,9 @@ class McpApplication:
         context: Optional[ExecutionContext] = None,
     ) -> types.CallToolResult:
         if isinstance(result, types.CallToolResult):
-            if component is not None and result.meta is None:
+            if component is not None:
                 result = result.model_copy(
-                    update={"_meta": build_call_tool_result_meta(component, result.meta)}
+                    update={"meta": build_call_tool_result_meta(component, self._call_tool_result_meta(result))}
                 )
             return result
         if isinstance(result, BaseModel):
@@ -644,7 +644,7 @@ class McpApplication:
             call_result = types.CallToolResult(**result)
             if component is not None:
                 call_result = call_result.model_copy(
-                    update={"_meta": build_call_tool_result_meta(component, call_result.meta)}
+                    update={"meta": build_call_tool_result_meta(component, self._call_tool_result_meta(call_result))}
                 )
             return call_result
 
@@ -662,6 +662,15 @@ class McpApplication:
             isError=False,
         )
 
+    @staticmethod
+    def _call_tool_result_meta(result: types.CallToolResult) -> Optional[Dict[str, Any]]:
+        """Read caller ``_meta`` from the field or pydantic extra (alias vs extra)."""
+        if result.meta:
+            return dict(result.meta)
+        extra = getattr(result, "model_extra", None) or {}
+        raw = extra.get("_meta") or extra.get("meta")
+        return dict(raw) if isinstance(raw, dict) else None
+
     def _widget_result_content(self, structured: Dict[str, Any], component: Optional[Component]) -> List[Any]:
         """Text fallback plus data-filled HTML so Inspector/Studio can paint the live result."""
         content: List[Any] = [
@@ -670,17 +679,25 @@ class McpApplication:
         if component is None:
             return content
         mime = get_widget_mime_type()
-        filled = component.html_with_data(structured)
-        content.append(
-            types.EmbeddedResource(
-                type="resource",
-                resource=types.TextResourceContents(
-                    uri=component.resource_uri,
-                    mimeType=mime,
-                    text=filled,
-                ),
+        try:
+            filled = component.html_with_data(structured)
+        except Exception:
+            logger.exception(
+                "Widget HTML render failed for %s; returning JSON without embedded HTML",
+                component.id,
             )
-        )
+            filled = None
+        if filled is not None:
+            content.append(
+                types.EmbeddedResource(
+                    type="resource",
+                    resource=types.TextResourceContents(
+                        uri=component.resource_uri,
+                        mimeType=mime,
+                        text=filled,
+                    ),
+                )
+            )
         content.append(
             types.ResourceLink(
                 type="resource_link",
@@ -1082,13 +1099,15 @@ class McpApplication:
 
     async def start(self) -> None:
         """Starts the MCP application based on transport configurations."""
-        # Start background OAuth discovery server if OAuthService is resolved
-        try:
-            from nitrostack.auth.oauth import OAuthService
-            oauth_service = DIContainer.get_instance().resolve(OAuthService)
+        # Start background OAuth discovery only when OAuthModule registered a service.
+        # resolve(OAuthService) would otherwise auto-instantiate and fail closed.
+        from nitrostack.auth.oauth import OAuthService, warn_if_oauth_fail_open
+
+        container = DIContainer.get_instance()
+        if container.has_value(OAuthService):
+            oauth_service = container.resolve(OAuthService)
             oauth_service.start_discovery_server()
-        except Exception:
-            pass
+            warn_if_oauth_fail_open()
 
         transport = os.environ.get("MCP_TRANSPORT_TYPE") or self.server_config.transport_type
         node_env = os.environ.get("NODE_ENV", "development")

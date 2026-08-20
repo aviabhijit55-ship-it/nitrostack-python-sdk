@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from urllib.parse import quote_plus
 
 from nitrostack.widgets.html_util import as_dict, esc
+
+_SAFE_HREF = re.compile(r"^(https?|mailto|tel):", re.IGNORECASE)
 
 SHARED_CSS = """
 html { color-scheme: light dark; }
@@ -118,8 +121,19 @@ def call_attrs(tool: str, args: dict | None = None) -> str:
     )
 
 
+def safe_href(url: str) -> str:
+    """Allow only ``http(s)``, ``mailto``, and ``tel`` schemes."""
+    raw = str(url or "").strip()
+    if not raw or not _SAFE_HREF.match(raw):
+        return ""
+    return raw
+
+
 def link_attrs(url: str) -> str:
-    return f'data-open-link="{esc(url)}" href="{esc(url)}"'
+    href = safe_href(url)
+    if not href:
+        return ""
+    return f'data-open-link="{esc(href)}" href="{esc(href)}"'
 
 
 def maps_url(shop: Any) -> str:
@@ -145,11 +159,14 @@ def phone_href(phone: Any) -> str:
 
 def action_row(*, maps: str = "", phone: str = "", website: str = "") -> str:
     parts: list[str] = []
-    if maps:
-        parts.append(f'<a class="ns-btn" {link_attrs(maps)}>Maps</a>')
+    maps_attrs = link_attrs(maps)
+    if maps_attrs:
+        parts.append(f'<a class="ns-btn" {maps_attrs}>Maps</a>')
     tel = phone_href(phone)
-    if tel:
-        parts.append(f'<a class="ns-btn" {link_attrs(tel)}>Call</a>')
-    if website:
-        parts.append(f'<a class="ns-btn ns-btn-primary" {link_attrs(str(website))}>Website</a>')
+    tel_attrs = link_attrs(tel)
+    if tel_attrs:
+        parts.append(f'<a class="ns-btn" {tel_attrs}>Call</a>')
+    website_attrs = link_attrs(str(website) if website else "")
+    if website_attrs:
+        parts.append(f'<a class="ns-btn ns-btn-primary" {website_attrs}>Website</a>')
     return f'<div class="ns-actions" id="actions">{"".join(parts)}</div>'

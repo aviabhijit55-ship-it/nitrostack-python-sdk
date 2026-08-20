@@ -41,6 +41,7 @@ from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from nitrostack.widgets.preview_page import render_preview_page
+from nitrostack.core.di import DIContainer
 from pydantic_core import PydanticUndefined
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -449,6 +450,16 @@ class SessionCapMiddleware:
         return len(self._sessions)
 
 
+def _oauth_is_configured() -> bool:
+    """True when ``OAuthModule.for_root`` registered an ``OAuthService`` instance."""
+    try:
+        from nitrostack.auth.oauth import OAuthService
+
+        return DIContainer.get_instance().has_value(OAuthService)
+    except Exception:
+        return False
+
+
 def build_http_app(
     mcp_app: "McpApplication",
     *,
@@ -581,15 +592,39 @@ def build_http_app(
         return HTMLResponse(render_preview_page(catalog))
 
     async def widgets_preview_call(request):
-        body = await request.json()
-        name = (body or {}).get("tool") or ""
-        arguments = (body or {}).get("arguments") or {}
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "JSON body must be an object"}, status_code=400)
+        name = body.get("tool") or ""
+        arguments = body.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            return JSONResponse({"error": "arguments must be an object"}, status_code=400)
         entry = getattr(mcp_app, "_tools", {}).get(name)
         if entry is None or getattr(entry, "component", None) is None:
             return JSONResponse({"error": f"No widget tool named {name!r}"}, status_code=404)
-        result = await mcp_app._call_tool(name, arguments)
+        try:
+            result = await mcp_app._call_tool(name, arguments)
+        except Exception as exc:
+            logger.exception("Widget preview tool call failed for %s", name)
+            return JSONResponse({"error": str(exc)}, status_code=400)
         structured = getattr(result, "structuredContent", None)
-        html = entry.component.html_with_data(structured)
+        try:
+            html = entry.component.html_with_data(structured)
+        except Exception as exc:
+            logger.exception("Widget preview render failed for %s", name)
+            return JSONResponse(
+                {
+                    "error": f"Widget render failed: {exc}",
+                    "structuredContent": structured,
+                    "html": None,
+                    "resourceUri": entry.component.resource_uri,
+                    "isError": True,
+                },
+                status_code=400,
+            )
         return JSONResponse(
             {
                 "structuredContent": structured,
@@ -637,6 +672,17 @@ def build_http_app(
             )
             yield
 
+    oauth_stub_routes: List[Route] = []
+    if not _oauth_is_configured():
+        # Inspector DCR / discovery stubs. Omit when OAuthModule is registered so
+        # a real protected-resource document is not replaced with "no OAuth".
+        oauth_stub_routes = [
+            Route("/.well-known/oauth-authorization-server", endpoint=oauth_not_supported, methods=["GET", "POST"]),
+            Route("/.well-known/oauth-protected-resource", endpoint=oauth_not_supported, methods=["GET", "POST"]),
+            Route("/register", endpoint=oauth_not_supported, methods=["GET", "POST"]),
+            Route("/oauth/v2/register", endpoint=oauth_not_supported, methods=["GET", "POST"]),
+        ]
+
     routes = [
         # More specific paths MUST come before the catch-all `Mount(endpoint, ...)`
         # below — Starlette matches routes in order, and a `Mount` matches any
@@ -645,10 +691,7 @@ def build_http_app(
         Route("/", endpoint=root_page, methods=["GET"]),
         Route("/widgets/preview", endpoint=widgets_preview, methods=["GET"]),
         Route("/widgets/preview/call", endpoint=widgets_preview_call, methods=["POST"]),
-        Route("/.well-known/oauth-authorization-server", endpoint=oauth_not_supported, methods=["GET", "POST"]),
-        Route("/.well-known/oauth-protected-resource", endpoint=oauth_not_supported, methods=["GET", "POST"]),
-        Route("/register", endpoint=oauth_not_supported, methods=["GET", "POST"]),
-        Route("/oauth/v2/register", endpoint=oauth_not_supported, methods=["GET", "POST"]),
+        *oauth_stub_routes,
         Route("/json/version", endpoint=json_version, methods=["GET"]),
         Route("/json/list", endpoint=json_list, methods=["GET"]),
         Route("/json", endpoint=json_list, methods=["GET"]),

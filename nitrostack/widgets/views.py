@@ -23,6 +23,34 @@ from nitrostack.widgets.html_util import (
 from nitrostack.widgets.ui import action_row, call_attrs, maps_url
 
 
+def _safe_int(
+    value: Any,
+    default: int = 0,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    try:
+        n = int(float(value))
+    except (TypeError, ValueError):
+        n = default
+    if minimum is not None:
+        n = max(minimum, n)
+    if maximum is not None:
+        n = min(maximum, n)
+    return n
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return default
+    if n != n or n in (float("inf"), float("-inf")):
+        return default
+    return n
+
+
 def pizza_list_body(data: Any | None) -> str:
     payload = as_dict(data)
     shops = as_list(payload.get("shops"))
@@ -42,7 +70,7 @@ def pizza_list_body(data: Any | None) -> str:
             shop = as_dict(shop)
             open_cls = "open" if shop.get("openNow") else "closed"
             open_label = "Open" if shop.get("openNow") else "Closed"
-            price = "$" * int(shop.get("priceLevel") or 1)
+            price = "$" * _safe_int(shop.get("priceLevel"), 1, minimum=1, maximum=4)
             img = ""
             if shop.get("image"):
                 img = f'<img class="img" src="{esc(shop["image"])}" alt="" />'
@@ -220,11 +248,11 @@ def chart_body(data: Any | None) -> str:
     payload = as_dict(data)
     title = payload.get("title") or "Chart"
     items = as_list(payload.get("items"))
-    max_v = max([float(as_dict(i).get("value") or 0) for i in items] or [1], default=1) or 1
+    values = [_safe_float(as_dict(i).get("value"), 0.0) for i in items]
+    max_v = max(values or [1], default=1) or 1
     bars = []
-    for item in items:
+    for item, value in zip(items, values):
         item = as_dict(item)
-        value = float(item.get("value") or 0)
         height = (value / max_v) * 140
         bars.append(
             '<div class="bar-wrap">'
