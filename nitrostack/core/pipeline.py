@@ -140,7 +140,12 @@ class OAuthGuard:
             if not token_info.get("active"):
                 return False
             
-            # Populate AuthContext
+            # Populate AuthContext. `aud` is legal as either a single string or a
+            # list of strings per JWT conventions, so it's normalized to a list
+            # here -- callers checking `"x" in context.auth.aud` should always get
+            # list-membership semantics, never accidental substring matching.
+            raw_aud = token_info.get("aud")
+            aud = raw_aud if isinstance(raw_aud, list) else ([raw_aud] if raw_aud else None)
             context.auth = AuthContext(
                 subject=token_info.get("sub"),
                 scopes=token_info.get("scope", "").split(" ") if token_info.get("scope") else [],
@@ -148,6 +153,7 @@ class OAuthGuard:
                 exp=token_info.get("exp"),
                 iat=token_info.get("iat"),
                 iss=token_info.get("iss"),
+                aud=aud,
                 claims=token_info,
                 token_payload=token_info
             )
