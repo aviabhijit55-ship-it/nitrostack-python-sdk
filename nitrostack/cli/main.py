@@ -1003,14 +1003,21 @@ def ensure_python_widgets(project_dir: str) -> list:
                 continue
             routes.extend(re.findall(r'@widget\(\s*["\']([^"\']+)["\']', text))
             routes.extend(re.findall(r'WidgetOptions\(\s*route\s*=\s*["\']([^"\']+)["\']', text))
+    # Only routes that were actually scaffolded go into the returned list — callers
+    # print it as "created", so appending before the write would report a widget that
+    # never landed on disk. A rejected route is surfaced rather than skipped silently.
     unique = []
+    seen = set()
     for route in routes:
-        if route not in unique:
-            unique.append(route)
+        if route in seen:
+            continue
+        seen.add(route)
         try:
             write_widget_html(project_dir, route, overwrite=False)
-        except ValueError:
+        except ValueError as exc:
+            print(f"Warning: skipped widget route {route!r}: {exc}")
             continue
+        unique.append(route)
     write_widget_preview(project_dir)
     return unique
 
@@ -1528,8 +1535,15 @@ def run_start(port=None, widget=None):
                 pass
 
 def generate_tool(name: str):
+    # Both validators run before anything is written. `_validate_generate_name` and
+    # `_sanitize_widget_route` accept overlapping-but-different character sets (e.g.
+    # `_foo` is a valid identifier but not a valid route; `my-tool` is the reverse),
+    # so validating the route lazily inside `write_widget_html` would leave an orphan
+    # `{name}_tool.py` behind whenever the two disagree — and that orphan then blocks
+    # any retry with "File already exists".
     try:
         name = _validate_generate_name(name)
+        _sanitize_widget_route(name)
     except ValueError as exc:
         print(f"Error: {exc}")
         sys.exit(1)

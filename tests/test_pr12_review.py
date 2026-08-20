@@ -106,3 +106,68 @@ def test_preview_page_escapes_script_breaking_json():
     assert json_for_inline_script(
         [{"name": "</script><img src=x onerror=alert(1)>"}]
     ).startswith("[")
+
+
+# ---------------------------------------------------------------------------
+# Follow-up findings from the re-review of 7d5530e
+# ---------------------------------------------------------------------------
+
+
+def test_generate_tool_validates_route_before_writing(tmp_path, monkeypatch):
+    """`_foo` is a valid Python identifier but an invalid widget route.
+
+    The route check must run before any file is written, otherwise the `.py` file
+    is left behind and then blocks the retry with "File already exists".
+    """
+    from nitrostack.cli.main import generate_tool
+
+    monkeypatch.chdir(tmp_path)
+    try:
+        generate_tool("_foo")
+        raise AssertionError("expected generate_tool to exit for a route-invalid name")
+    except SystemExit as exc:
+        assert exc.code == 1
+
+    assert list(tmp_path.iterdir()) == [], (
+        f"generate_tool left files behind after failing: {list(tmp_path.iterdir())}"
+    )
+
+
+def test_ensure_python_widgets_only_reports_written_routes(tmp_path, capsys):
+    """A route that cannot be scaffolded must not be reported as created."""
+    from nitrostack.cli.main import ensure_python_widgets
+
+    (tmp_path / "tools.py").write_text(
+        'from nitrostack import widget\n\n'
+        '@widget("good-route")\n'
+        'def a(): pass\n\n'
+        '@widget("bad/route")\n'
+        'def b(): pass\n',
+        encoding="utf-8",
+    )
+
+    reported = ensure_python_widgets(str(tmp_path))
+    out_dir = tmp_path / "widgets" / "out"
+    on_disk = sorted(p.stem for p in out_dir.glob("*.html"))
+
+    assert reported == on_disk == ["good-route"]
+    assert "bad/route" not in reported
+    assert "skipped widget route" in capsys.readouterr().out
+
+
+def test_safe_int_survives_infinity():
+    """`json.loads('1e400')` yields `inf`; `int(float('inf'))` raises OverflowError.
+
+    `_safe_float` already guards this — `_safe_int` must too, otherwise the
+    EmbeddedResource is dropped and the widget silently fails to render.
+    """
+    from nitrostack.widgets.views import _safe_float, _safe_int
+
+    assert _safe_int(float("inf")) == 0
+    assert _safe_int(float("-inf")) == 0
+    assert _safe_int(float("nan")) == 0
+    assert _safe_int(float("inf"), minimum=0, maximum=4) == 0
+    assert _safe_float(float("inf")) == 0.0
+    # Ordinary values still coerce normally.
+    assert _safe_int(3.7) == 3
+    assert _safe_int("2") == 2

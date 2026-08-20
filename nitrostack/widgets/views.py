@@ -31,8 +31,10 @@ def _safe_int(
     maximum: int | None = None,
 ) -> int:
     try:
+        # OverflowError covers infinities: `json.loads("1e400")` yields `inf`, and
+        # `int(float("inf"))` raises. NaN already surfaces as ValueError.
         n = int(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         n = default
     if minimum is not None:
         n = max(minimum, n)
