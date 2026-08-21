@@ -189,6 +189,31 @@ def test_parse_tool_input_accepts_inspector_and_legacy_wrap():
     shop_wrapped = parse_tool_input(ShowShopInput, {"input": {"shopId": "bella-napoli"}})
     assert shop_wrapped.shopId == "bella-napoli"
 
+    # Inspector leaves unused enum/optional fields as "".
+    blank_map = parse_tool_input(ShowMapInput, {"filter": ""})
+    assert blank_map.filter == "all"
+    whitespace_map = parse_tool_input(ShowMapInput, {"filter": "   "})
+    assert whitespace_map.filter == "all"
+    missing_map = parse_tool_input(ShowMapInput, {})
+    assert missing_map.filter == "all"
+    wrapped_blank = parse_tool_input(ShowMapInput, {"input": {"filter": ""}})
+    assert wrapped_blank.filter == "all"
+    explicit_all = parse_tool_input(ShowMapInput, {"filter": "all"})
+    assert explicit_all.filter == "all"
+    open_now = parse_tool_input(ShowMapInput, {"filter": "open_now"})
+    assert open_now.filter == "open_now"
+
+    blank_list = parse_tool_input(ShowListInput, {"openNow": "", "minRating": "", "maxPrice": ""})
+    assert blank_list.openNow is None
+    assert blank_list.minRating is None
+    assert blank_list.maxPrice is None
+
+    try:
+        parse_tool_input(ShowShopInput, {"shopId": ""})
+        raise AssertionError("required shopId must still reject an empty string")
+    except Exception:
+        pass
+
 
 async def _listed_tools() -> Dict[str, types.Tool]:
     harness = await NitroTestingModule.create(SchemaToolsModule)
@@ -239,6 +264,14 @@ def test_call_tool_accepts_top_level_and_wrapped_arguments():
             "calculate", {"input": {"operation": "multiply", "a": 4, "b": 5}}
         )
         assert calc_wrapped["operation"] == "multiply"
+
+        # Inspector pizza-map form sends filter="" when left empty / "all".
+        mapped = await harness.call_tool("show_pizza_map", {"filter": ""})
+        assert mapped["filter"] == "all"
+        mapped_all = await harness.call_tool("show_pizza_map", {"filter": "all"})
+        assert mapped_all["filter"] == "all"
+        mapped_open = await harness.call_tool("show_pizza_map", {"filter": "open_now"})
+        assert mapped_open["filter"] == "open_now"
 
     asyncio.run(_run())
 

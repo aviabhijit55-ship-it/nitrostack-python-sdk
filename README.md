@@ -273,6 +273,71 @@ nitrostack-py register --name my-mcp-server --file app.py
 
 This detects all standard and Windows Store installation directories, sets up virtualenv executables, and writes the JSON configuration. Once registered, simply restart Claude Desktop.
 
+### Widgets (UI tools)
+
+Bind a static HTML template to a tool with `@widget` and return domain JSON from the handler:
+
+```python
+from nitrostack import tool, widget, ExecutionContext
+
+@tool(name="show_card", description="Product card", input_schema=CardInput)
+@widget("card")
+async def show_card(self, input: CardInput, context: ExecutionContext) -> dict:
+    return {"name": "Widget", "price": 9.99}
+```
+
+Place HTML at `widgets/out/{route}.html` (e.g. `widgets/out/card.html`). The SDK registers
+`ui://widget/card.html` as an MCP resource and sets mode-gated `_meta` on `tools/list` and
+`tools/call` results.
+
+**`NITROSTACK_APP_MODE`** (default `universal`):
+
+| Mode | Tool `_meta` | Resource MIME |
+|------|----------------|---------------|
+| `universal` (default) | Both OpenAI and MCP Apps keys | `text/html;profile=mcp-app` |
+| `openai` | `openai/outputTemplate`, `ui/template` | `text/html` |
+| `mcp-app` | `_meta.ui` (`resourceUri`, `visibility`, CSP) | `text/html;profile=mcp-app` |
+
+Object form for CSP and border options:
+
+```python
+from nitrostack import WidgetOptions, WidgetCsp, widget
+
+@widget(WidgetOptions(
+    route="chart",
+    prefers_border=True,
+    csp=WidgetCsp(connect_domains=["https://api.example.com"]),
+))
+```
+
+`nitrostack-py init` copies `widgets/out/{route}.html` for every `@widget`. Widget HTML
+is generated in Python from the tool's `structuredContent` (one iframe, N cards).
+
+MCP Inspector: use **HTTP + stateless**, then the **Apps** tab. `tools/call` also embeds
+the data-filled HTML. Do not use `widgets/preview.html` as the live result — that file
+is a static helper. Live preview: `http://localhost:3000/widgets/preview`.
+
+Turn **Authentication off** in Inspector. Pizzaz/starter have no OAuth. If Auth is on,
+Inspector POSTs `/register` and you will see `Cannot POST /register` / `Unexpected token '<'`.
+Connect Streamable HTTP to `http://localhost:3000/mcp` (no trailing slash).
+
+For **open pizza shops only**, call `show_pizza_list` with `{"openNow": true}` or
+`show_pizza_map` with `{"filter": "open_now"}`. Omitting those fields returns every shop,
+including closed ones (Pizzeria Delfina).
+
+**NitroStudio:** folder-connect looks for a TypeScript project (`package.json` with
+`@nitrostack/core` and `src/index.ts`). A Python server will not detect. Keep using
+MCP Inspector over HTTP, or point Studio at a custom Streamable HTTP URL if the build
+supports it. Do not enable OAuth against this server.
+
+Example server: `examples/widgets_example.py` with templates in `examples/widgets/out/`.
+For MCP Inspector over HTTP, use stateless mode:
+
+```bash
+cd examples
+MCP_TRANSPORT_TYPE=http MCP_STATELESS=true NITROSTACK_APP_MODE=universal python widgets_example.py
+```
+
 ### Running Tests
 To run the automated test suite, execute:
 ```bash
@@ -280,6 +345,10 @@ python tests/test_basic.py
 python tests/test_tasks.py
 python tests/test_initial_tool.py
 python tests/test_transports.py
+python tests/test_widgets.py
+python tests/test_widget_metadata.py
+python tests/test_pizzaz_widgets.py
+python tests/test_template_widgets.py
 python tests/test_cli.py
 pytest tests/test_cli.py -v
 python tests/test_tool_input_schema.py

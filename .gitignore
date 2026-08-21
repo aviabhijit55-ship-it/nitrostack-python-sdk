@@ -58,6 +58,12 @@ adv-proj/
 new-mcp-server/
 mcp-app/
 abhijit/
+pizza-app/
+pizza-mcp-serevr/
+flight-book-app/
+my-pizza-app/
+my-test-server/
+new-app/
 
 # Node widgets (if installed locally in examples/templates)
 node_modules/

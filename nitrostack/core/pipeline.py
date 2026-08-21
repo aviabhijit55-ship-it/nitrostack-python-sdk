@@ -120,27 +120,52 @@ class JwtGuard:
             context.logger.error(f"JWT Guard token validation failed: {e}")
             return False
 
+def _extract_oauth_token(context: ExecutionContext) -> Optional[str]:
+    """Studio / MCP hosts send the token in several metadata slots (TS parity)."""
+    headers = context.metadata.get("headers") if isinstance(context.metadata.get("headers"), dict) else {}
+    auth_header = (
+        context.metadata.get("authorization")
+        or headers.get("authorization")
+        or headers.get("Authorization")
+    )
+    if isinstance(auth_header, str) and auth_header.startswith("Bearer "):
+        return auth_header[len("Bearer "):].strip() or None
+    meta_token = context.metadata.get("_oauth") or context.metadata.get("token")
+    if isinstance(meta_token, str) and meta_token.strip():
+        return meta_token.strip()
+    return None
+
+
 class OAuthGuard:
     """
     Validates OAuth 2.1 access token with audience binding.
+
+    Matches the TS SDK: unless ``OAUTH_REQUIRED=true``, requests without a
+    token are allowed so Studio can exercise mock flight widgets locally.
     """
     async def can_activate(self, context: ExecutionContext) -> bool:
-        auth_header = context.metadata.get("authorization") or context.metadata.get("headers", {}).get("authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return False
-        
-        token = auth_header[len("Bearer "):]
-        
+        from nitrostack.auth.oauth import OAuthService, is_oauth_required
+
+        token = _extract_oauth_token(context)
+        required = is_oauth_required()
+
+        if not token:
+            if not required:
+                return True
+            raise PermissionError(
+                "OAuth token required. Authenticate in Studio (Auth → OAuth) "
+                "or unset OAUTH_REQUIRED to use mock flights locally."
+            )
+
         container = DIContainer.get_instance()
         try:
-            from nitrostack.auth.oauth import OAuthService
             oauth_service = container.resolve(OAuthService)
-            # Introspect token
             token_info = await oauth_service.introspect_token(token)
             if not token_info.get("active"):
+                if not required:
+                    return True
                 return False
-            
-            # Populate AuthContext
+
             context.auth = AuthContext(
                 subject=token_info.get("sub"),
                 scopes=token_info.get("scope", "").split(" ") if token_info.get("scope") else [],
@@ -152,9 +177,15 @@ class OAuthGuard:
                 token_payload=token_info
             )
             return True
+        except PermissionError:
+            raise
         except Exception as e:
             context.logger.error(f"OAuth Guard validation failed: {e}")
-            return False
+            if not required:
+                context.logger.warning(
+                    "OAuth validation failed but OAUTH_REQUIRED is off; allowing the request"
+                )
+            return not required
 
 
 # Pipeline Runner logic

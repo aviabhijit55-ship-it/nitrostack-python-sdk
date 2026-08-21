@@ -129,8 +129,13 @@ def test_init_with_name_and_explicit_template():
         env_text = open(os.path.join(project, ".env"), encoding="utf-8").read()
         assert "PORT=3000" in env_text
         assert "WIDGETS_DEV_PORT=3001" in env_text
+        assert "NITROSTACK_APP_MODE=universal" in env_text
         assert "SERVER_DESC=\"A test server\"" in env_text
         assert "SERVER_AUTHOR=\"Tester\"" in env_text
+        assert os.path.isfile(os.path.join(project, "widgets", "out", "calculator-result.html"))
+        calc_html = open(os.path.join(project, "widgets", "out", "calculator-result.html"), encoding="utf-8").read()
+        assert "ui/notifications/tool-result" in calc_html
+        assert os.path.isfile(os.path.join(project, "widgets", "preview.html"))
         print("Success! Named init with python-starter writes PORT=3000.")
     finally:
         sys.stdin = original_stdin
@@ -165,6 +170,12 @@ def test_init_default_name_when_blank_readline():
         assert os.path.isdir(os.path.join(tmp, DEFAULT_PROJECT_NAME))
         env_text = open(os.path.join(tmp, DEFAULT_PROJECT_NAME, ".env"), encoding="utf-8").read()
         assert "PORT=3000" in env_text
+        project = os.path.join(tmp, DEFAULT_PROJECT_NAME)
+        for route in ("pizza-list", "pizza-map", "pizza-shop"):
+            assert os.path.isfile(os.path.join(project, "widgets", "out", f"{route}.html"))
+        preview = open(os.path.join(project, "widgets", "preview.html"), encoding="utf-8").read()
+        assert "Tony" in preview or "shops" in preview
+        assert os.path.isfile(os.path.join(project, "widgets", "preview.html"))
         print("Success! Blank name readline falls back to my-mcp-server.")
     finally:
         sys.stdin = original_stdin
@@ -184,6 +195,18 @@ def test_init_python_oauth_template():
         assert os.path.isfile(os.path.join(project, "OAUTH_SETUP.md"))
         env_text = open(os.path.join(project, ".env"), encoding="utf-8").read()
         assert "PORT=3000" in env_text
+        for route in (
+            "flight-search-results",
+            "flight-details",
+            "airport-search",
+            "order-summary",
+            "seat-selection",
+            "order-cancellation",
+        ):
+            html = open(os.path.join(project, "widgets", "out", f"{route}.html"), encoding="utf-8").read()
+            assert os.path.isfile(os.path.join(project, "widgets", "out", f"{route}.html")), route
+            assert "nitrostack-tool-data" in html
+        assert os.path.isfile(os.path.join(project, "widgets", "preview.html"))
         print("Success! python-oauth template scaffolds with PORT=3000.")
     finally:
         sys.stdin = original_stdin
@@ -250,8 +273,6 @@ def test_cli_dev_and_start_port_flags():
 
 
 def test_init_port_and_widget_flags_override_defaults():
-    import json
-
     tmp = tempfile.mkdtemp(prefix="nitro-cli-ports-")
     original_cwd = os.getcwd()
     original_stdin = sys.stdin
@@ -268,11 +289,8 @@ def test_init_port_and_widget_flags_override_defaults():
         env_text = open(os.path.join(tmp, "ports-demo", ".env"), encoding="utf-8").read()
         assert "PORT=4000" in env_text
         assert "WIDGETS_DEV_PORT=4001" in env_text
-        # The port is supplied once by the CLI at run time, not baked into the
-        # npm scripts, so the scripts stay port-free.
-        pkg = json.load(open(os.path.join(tmp, "ports-demo", "src", "widgets", "package.json"), encoding="utf-8"))
-        assert pkg["scripts"]["dev"] == "next dev"
-        assert pkg["scripts"]["start"] == "next start"
+        assert os.path.isfile(os.path.join(tmp, "ports-demo", "widgets", "out", "calculator-result.html"))
+        assert not os.path.exists(os.path.join(tmp, "ports-demo", "src", "widgets", "package.json"))
         print("Success! --port and --widget override generated project ports.")
     finally:
         sys.stdin = original_stdin
@@ -553,10 +571,8 @@ def test_init_project_overwrite_and_install_yes_calls_npm():
         sys.stdin = io.StringIO("d\na\nY\n")
         with patch("nitrostack.cli.main._run_npm") as npm:
             init_project("installed", template="python-starter")
-            assert npm.call_count >= 2
-            called_args = [call.args[0] for call in npm.call_args_list]
-            assert ["--version"] in called_args
-            assert ["install"] in called_args
+            npm.assert_not_called()
+        assert os.path.isfile(os.path.join("installed", "widgets", "out", "calculator-result.html"))
         print("Success! init_project overwrite and install-yes npm path work.")
     finally:
         sys.stdin = original_stdin
@@ -662,6 +678,9 @@ def test_generate_tool_and_module():
         content = open("hello_world_tool.py", encoding="utf-8").read()
         assert "hello_world" in content
         assert "HelloWorldInput" in content
+        assert '@widget("hello_world")' in content
+        assert os.path.isfile(os.path.join("widgets", "out", "hello_world.html"))
+        assert os.path.isfile(os.path.join("widgets", "preview.html"))
         try:
             generate_tool("hello_world")
             raise AssertionError("duplicate generate_tool should exit")
@@ -677,6 +696,33 @@ def test_generate_tool_and_module():
         except SystemExit:
             pass
         print("Success! generate_tool and generate_module write files and refuse overwrites.")
+    finally:
+        os.chdir(original_cwd)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_generate_tool_rejects_path_traversal():
+    from nitrostack.cli.main import write_widget_html
+
+    tmp = tempfile.mkdtemp(prefix="nitro-cli-gen-safe-")
+    original_cwd = os.getcwd()
+    try:
+        os.chdir(tmp)
+        try:
+            generate_tool("../../ESCAPED")
+            raise AssertionError("path traversal generate_tool should exit")
+        except SystemExit:
+            pass
+        assert not os.path.isfile(os.path.join(tmp, "ESCAPED_tool.py"))
+        parent = os.path.abspath(os.path.join(tmp, "..", ".."))
+        assert "ESCAPED_tool.py" not in os.listdir(parent)
+        try:
+            write_widget_html(tmp, "../../ESCAPED")
+            raise AssertionError("path traversal write_widget_html should raise")
+        except ValueError:
+            pass
+        assert not os.path.isfile(os.path.join(tmp, "widgets", "out", "ESCAPED.html"))
+        print("Success! generate_tool rejects path traversal.")
     finally:
         os.chdir(original_cwd)
         shutil.rmtree(tmp, ignore_errors=True)
@@ -1344,6 +1390,7 @@ if __name__ == "__main__":
     test_run_dev_passes_port_overrides_and_starts_widgets()
     test_run_start_passes_port_overrides()
     test_generate_tool_and_module()
+    test_generate_tool_rejects_path_traversal()
     test_get_claude_config_paths_by_platform()
     test_register_server_writes_config_and_handles_errors()
     test_main_dispatches_commands()

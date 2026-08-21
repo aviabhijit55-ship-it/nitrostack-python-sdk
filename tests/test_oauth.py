@@ -23,7 +23,8 @@ async def _test_oauth_guard_validation():
 
     guard = OAuthGuard()
 
-    # Case A: Missing Authorization Header
+    # Case A: Missing Authorization Header — Studio default (OAUTH_REQUIRED unset)
+    os.environ.pop("OAUTH_REQUIRED", None)
     ctx_missing = ExecutionContext(
         request_id="test-req-1",
         tool_name="test-tool",
@@ -31,8 +32,24 @@ async def _test_oauth_guard_validation():
         metadata={}
     )
     res_missing = await guard.can_activate(ctx_missing)
-    print("Missing authorization header check:", res_missing)
-    assert res_missing is False
+    print("Missing authorization header (auth optional):", res_missing)
+    assert res_missing is True
+
+    os.environ["OAUTH_REQUIRED"] = "true"
+    try:
+        ctx_required = ExecutionContext(
+            request_id="test-req-1b",
+            tool_name="test-tool",
+            logger=MagicMock(),
+            metadata={}
+        )
+        try:
+            await guard.can_activate(ctx_required)
+            raise AssertionError("OAUTH_REQUIRED=true must reject a missing token")
+        except PermissionError as exc:
+            assert "OAuth token required" in str(exc)
+    finally:
+        os.environ.pop("OAUTH_REQUIRED", None)
 
     # Case B: Malformed Authorization Header (no Bearer prefix)
     ctx_malformed = ExecutionContext(
@@ -42,8 +59,8 @@ async def _test_oauth_guard_validation():
         metadata={"authorization": "Basic abcdef"}
     )
     res_malformed = await guard.can_activate(ctx_malformed)
-    print("Malformed authorization header check:", res_malformed)
-    assert res_malformed is False
+    print("Malformed authorization header check (auth optional):", res_malformed)
+    assert res_malformed is True
 
     # Case C: Valid Bearer Token but Introspection returns active = False
     ctx_invalid = ExecutionContext(
@@ -58,9 +75,17 @@ async def _test_oauth_guard_validation():
     
     with patch.object(oauth_service, 'introspect_token', return_value={"active": False}) as mock_introspect:
         res_invalid = await guard.can_activate(ctx_invalid)
-        print("Invalid token check:", res_invalid)
-        assert res_invalid is False
+        print("Invalid token check (auth optional):", res_invalid)
+        assert res_invalid is True
         mock_introspect.assert_called_once_with("invalid-token")
+
+    os.environ["OAUTH_REQUIRED"] = "true"
+    try:
+        with patch.object(oauth_service, "introspect_token", return_value={"active": False}):
+            res_invalid_required = await guard.can_activate(ctx_invalid)
+            assert res_invalid_required is False
+    finally:
+        os.environ.pop("OAUTH_REQUIRED", None)
 
     # Case D: Valid Bearer Token and Introspection returns active = True with scopes
     ctx_valid = ExecutionContext(
