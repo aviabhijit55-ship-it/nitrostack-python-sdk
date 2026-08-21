@@ -63,10 +63,28 @@ class OAuthService:
         self.resource_uri = resource_uri
         self.authorization_servers = authorization_servers
         self.scopes_supported = scopes_supported
-        self.token_introspection_endpoint = token_introspection_endpoint
-        self.token_introspection_client_id = token_introspection_client_id
-        self.token_introspection_client_secret = token_introspection_client_secret
         self.discovery_port = discovery_port
+
+        # Introspection settings fall back to the environment when not passed
+        # explicitly. Both spellings of the endpoint variable are accepted: the
+        # setup docs (OAUTH_SETUP.md, the CLI's generated guide, and the flight
+        # booking example) all document `OAUTH_INTROSPECTION_ENDPOINT`, while the
+        # generated app modules read `INTROSPECTION_ENDPOINT` -- so following the
+        # documentation used to leave introspection silently unconfigured.
+        # Resolving both here fixes it for every caller at once, including app
+        # modules already written against either name. The TypeScript SDK reads
+        # both variables too.
+        self.token_introspection_endpoint = (
+            token_introspection_endpoint
+            or os.environ.get("OAUTH_INTROSPECTION_ENDPOINT")
+            or os.environ.get("INTROSPECTION_ENDPOINT")
+        )
+        self.token_introspection_client_id = (
+            token_introspection_client_id or os.environ.get("INTROSPECTION_CLIENT_ID")
+        )
+        self.token_introspection_client_secret = (
+            token_introspection_client_secret or os.environ.get("INTROSPECTION_CLIENT_SECRET")
+        )
 
         # Environmental fallbacks
         self.jwks_uri = jwks_uri or os.environ.get("JWKS_URI")

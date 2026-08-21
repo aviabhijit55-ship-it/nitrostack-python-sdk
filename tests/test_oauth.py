@@ -481,6 +481,97 @@ def test_token_cache_respects_ttl_expiry():
     print("Success! Cache entries expire after their TTL.")
 
 
+
+# ---------------------------------------------------------------------------
+# Introspection endpoint env-var resolution
+# ---------------------------------------------------------------------------
+
+def _clear_introspection_env():
+    for key in (
+        "OAUTH_INTROSPECTION_ENDPOINT",
+        "INTROSPECTION_ENDPOINT",
+        "INTROSPECTION_CLIENT_ID",
+        "INTROSPECTION_CLIENT_SECRET",
+        "JWKS_URI",
+    ):
+        os.environ.pop(key, None)
+
+
+def _service():
+    return OAuthService(
+        resource_uri="http://localhost:3000/mcp",
+        authorization_servers=["https://idp.example.com"],
+        scopes_supported=["read"],
+    )
+
+
+def test_documented_introspection_env_var_is_honored():
+    """OAUTH_SETUP.md, the CLI setup guide, and the flight-booking example all
+    document `OAUTH_INTROSPECTION_ENDPOINT`, but the generated app modules read
+    `INTROSPECTION_ENDPOINT`. Following the docs used to leave introspection
+    silently unconfigured, which after the mock-fallback removal means every
+    token is rejected. Both spellings must resolve."""
+    print("Testing OAUTH_INTROSPECTION_ENDPOINT (the documented name) is honored...")
+    saved = dict(os.environ)
+    try:
+        _clear_introspection_env()
+        os.environ["OAUTH_INTROSPECTION_ENDPOINT"] = "https://idp.example.com/introspect"
+        assert _service().token_introspection_endpoint == "https://idp.example.com/introspect"
+
+        _clear_introspection_env()
+        os.environ["INTROSPECTION_ENDPOINT"] = "https://legacy.example.com/introspect"
+        assert _service().token_introspection_endpoint == "https://legacy.example.com/introspect"
+
+        # Both set: the OAUTH_-prefixed name wins.
+        _clear_introspection_env()
+        os.environ["OAUTH_INTROSPECTION_ENDPOINT"] = "https://a.example.com/i"
+        os.environ["INTROSPECTION_ENDPOINT"] = "https://b.example.com/i"
+        assert _service().token_introspection_endpoint == "https://a.example.com/i"
+
+        # Neither set: stays None, so the service has no verifier and rejects.
+        _clear_introspection_env()
+        assert _service().token_introspection_endpoint is None
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    print("Success! Both introspection env var spellings resolve.")
+
+
+def test_explicit_introspection_arg_beats_env():
+    print("Testing an explicit introspection endpoint argument overrides the environment...")
+    saved = dict(os.environ)
+    try:
+        _clear_introspection_env()
+        os.environ["OAUTH_INTROSPECTION_ENDPOINT"] = "https://env.example.com/i"
+        service = OAuthService(
+            resource_uri="http://localhost:3000/mcp",
+            authorization_servers=["https://idp.example.com"],
+            scopes_supported=["read"],
+            token_introspection_endpoint="https://explicit.example.com/i",
+        )
+        assert service.token_introspection_endpoint == "https://explicit.example.com/i"
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    print("Success! Explicit configuration takes precedence over the environment.")
+
+
+def test_introspection_client_credentials_resolve_from_env():
+    print("Testing introspection client credentials fall back to the environment...")
+    saved = dict(os.environ)
+    try:
+        _clear_introspection_env()
+        os.environ["INTROSPECTION_CLIENT_ID"] = "client-abc"
+        os.environ["INTROSPECTION_CLIENT_SECRET"] = "secret-xyz"
+        service = _service()
+        assert service.token_introspection_client_id == "client-abc"
+        assert service.token_introspection_client_secret == "secret-xyz"
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    print("Success! Introspection client credentials resolve from the environment.")
+
+
 if __name__ == "__main__":
     test_oauth_guard_validation()
     test_pkce_round_trip()
@@ -501,4 +592,7 @@ if __name__ == "__main__":
     test_jwks_client_is_cached()
     test_token_result_is_cached()
     test_token_cache_respects_ttl_expiry()
+    test_documented_introspection_env_var_is_honored()
+    test_explicit_introspection_arg_beats_env()
+    test_introspection_client_credentials_resolve_from_env()
     print("\nAll OAuth tests passed successfully!")
