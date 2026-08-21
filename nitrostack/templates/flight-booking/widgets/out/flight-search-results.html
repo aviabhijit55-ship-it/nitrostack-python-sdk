@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
+  <title>Flight search</title>
+  <style>
+html { color-scheme: light dark; }
+:root {
+  --ns-bg: var(--color-background-primary, light-dark(#f7f7f5, #161615));
+  --ns-surface: var(--color-background-secondary, light-dark(#ffffff, #242422));
+  --ns-text: var(--color-text-primary, light-dark(#141413, #f5f4ef));
+  --ns-muted: var(--color-text-secondary, light-dark(#6b6b66, #a8a8a0));
+  --ns-border: var(--color-border-primary, light-dark(#e6e4de, #3a3a36));
+  --ns-accent: #ea580c;
+  --ns-accent-soft: #ffedd5;
+  --ns-ok: #166534;
+  --ns-ok-bg: #dcfce7;
+  --ns-bad: #991b1b;
+  --ns-bad-bg: #fee2e2;
+  --ns-radius: var(--border-radius-md, 14px);
+  --ns-shadow: 0 1px 2px rgb(0 0 0 / 6%);
+  --ns-shadow-hover: 0 8px 24px rgb(0 0 0 / 12%);
+}
+[data-theme="dark"] {
+  --ns-accent-soft: #3b2414;
+  --ns-ok-bg: #14532d;
+  --ns-ok: #bbf7d0;
+  --ns-bad-bg: #7f1d1d;
+  --ns-bad: #fecaca;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
+  background: var(--ns-bg);
+  color: var(--ns-text);
+  padding: max(12px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(12px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+}
+body.ns-flush { padding: 0; overflow: hidden; }
+h1 { font-size: 1.1rem; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.02em; }
+h2 { font-size: 0.95rem; margin: 14px 0 6px; }
+.meta { color: var(--ns-muted); font-size: 0.82rem; margin-bottom: 12px; }
+.muted { color: var(--ns-muted); font-size: 0.85rem; }
+.empty { color: var(--ns-muted); padding: 24px 0; text-align: center; }
+.ns-chrome {
+  display: flex; justify-content: flex-end; gap: 6px; margin: -4px 0 8px;
+}
+body.ns-flush .ns-chrome {
+  position: absolute; top: 12px; right: 12px; z-index: 5; margin: 0;
+}
+.ns-icon-btn, .ns-btn {
+  appearance: none; font: inherit; cursor: pointer;
+  border: 1px solid var(--ns-border); background: var(--ns-surface);
+  color: var(--ns-text); border-radius: 999px; text-decoration: none;
+}
+.ns-icon-btn {
+  width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: var(--ns-shadow);
+}
+.ns-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 8px 12px; font-size: 0.82rem; font-weight: 600;
+  box-shadow: var(--ns-shadow);
+}
+.ns-btn-primary { background: var(--ns-accent); color: #fff; border-color: transparent; }
+.ns-icon-btn:hover, .ns-btn:hover, .ns-card:hover {
+  box-shadow: var(--ns-shadow-hover);
+}
+.ns-card:hover { transform: translateY(-1px); }
+.ns-icon-btn:focus-visible, .ns-btn:focus-visible, .ns-card:focus-visible {
+  outline: 2px solid var(--ns-accent); outline-offset: 2px;
+}
+.ns-card {
+  background: var(--ns-surface); border: 1px solid var(--ns-border);
+  border-radius: var(--ns-radius); padding: 12px 14px; box-shadow: var(--ns-shadow);
+  cursor: pointer; text-align: left;
+}
+.ns-card.is-busy, .ns-btn.is-busy { opacity: 0.6; pointer-events: none; }
+.ns-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.badge, .chip {
+  display: inline-block; font-size: 0.72rem; font-weight: 600;
+  padding: 2px 8px; border-radius: 999px; background: var(--ns-accent-soft); color: var(--ns-accent);
+}
+.badge.open, .seat.ok { background: var(--ns-ok-bg); color: var(--ns-ok); }
+.badge.closed, .seat.no { background: var(--ns-bad-bg); color: var(--ns-bad); }
+.rating { color: var(--ns-accent); font-weight: 700; font-variant-numeric: tabular-nums; }
+.price { font-weight: 800; font-variant-numeric: tabular-nums; color: var(--ns-accent); }
+.id, .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.scroller, .cards {
+  display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px;
+  scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch;
+}
+.sorts { display: flex; gap: 6px; margin: 0 0 12px; }
+.sorts button {
+  appearance: none; font: inherit; font-size: 0.75rem; font-weight: 600;
+  padding: 4px 10px; border-radius: 999px; border: 1px solid var(--ns-border);
+  background: var(--ns-surface); color: var(--ns-muted); cursor: pointer;
+}
+.sorts button.is-on { background: var(--ns-accent); color: #fff; border-color: transparent; }
+
+    :root { --ns-accent: #0369a1; --ns-accent-soft: #e0f2fe; }
+    .offer, .card, #list .row { background: var(--ns-surface); border: 1px solid var(--ns-border); border-radius: var(--ns-radius); padding: 12px; margin-bottom: 10px; }
+    .row { display: flex; gap: 12px; align-items: center; }
+    .id { font-size: 0.8rem; color: var(--ns-muted); }
+    .code { font-size: 1.1rem; font-weight: 800; min-width: 3rem; }
+    .slice { margin-top: 8px; }
+    .seat-row { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+    .rn { width: 2rem; font-size: 0.8rem; color: var(--ns-muted); }
+    .seat { display: inline-block; min-width: 2.4rem; text-align: center; padding: 4px; border-radius: 6px; font-size: 0.75rem; }
+
+  </style>
+</head>
+<body>
+  <script type="application/json" id="nitrostack-tool-data">null</script>
+  <div class="ns-chrome"><button type="button" class="ns-icon-btn" data-display-mode="fullscreen" title="Expand" aria-label="Expand widget">⤢</button></div>
+<h1>Flight search</h1><div class="meta" id="meta">Waiting for search_flights result.</div><div id="list"></div><div id="root"></div>
+  <script>
+window.openai = window.openai || {};
+var __nitrostack_rpcId = 1;
+var __nitrostack_initId = null;
+var __nitrostack_pending = {};
+function __nitrostack_postToHost(msg) {
+  if (window.parent && window.parent !== window) {
+    window.parent.postMessage(msg, "*");
+  }
+}
+function __nitrostack_rpc(method, params) {
+  var id = __nitrostack_rpcId++;
+  return new Promise(function(resolve, reject) {
+    __nitrostack_pending[id] = { resolve: resolve, reject: reject, method: method };
+    __nitrostack_postToHost({ jsonrpc: "2.0", id: id, method: method, params: params || {} });
+    setTimeout(function() {
+      if (__nitrostack_pending[id]) {
+        delete __nitrostack_pending[id];
+        reject(new Error(method + " timed out"));
+      }
+    }, 20000);
+  });
+}
+function __nitrostack_applyTheme(ctx) {
+  ctx = ctx || {};
+  var theme = ctx.theme || (window.openai && window.openai.theme) || "";
+  if (theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    document.documentElement.style.colorScheme = theme;
+    if (document.body) document.body.setAttribute("data-theme", theme);
+  }
+  var styles = ctx.styles || {};
+  var vars = styles.variables || styles;
+  if (vars && typeof vars === "object") {
+    Object.keys(vars).forEach(function(key) {
+      if (key.indexOf("--") === 0 && vars[key] != null) {
+        document.documentElement.style.setProperty(key, String(vars[key]));
+      }
+    });
+  }
+}
+function __nitrostack_callTool(name, args) {
+  args = args || {};
+  if (window.openai && typeof window.openai.callTool === "function") {
+    return window.openai.callTool(name, args);
+  }
+  return __nitrostack_rpc("tools/call", { name: name, arguments: args }).then(function(result) {
+    if (result) __nitrostack_acceptToolResult(result);
+    return result;
+  });
+}
+function __nitrostack_isSafeUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  return /^(https?|mailto|tel):/i.test(url.trim());
+}
+function __nitrostack_openLink(url) {
+  if (!__nitrostack_isSafeUrl(url)) return;
+  if (window.openai && typeof window.openai.openExternal === "function") {
+    window.openai.openExternal({ href: url });
+    return;
+  }
+  __nitrostack_rpc("ui/open-link", { url: url }).catch(function() {
+    try { window.open(url, "_blank", "noopener"); } catch (e) {}
+  });
+}
+function __nitrostack_requestDisplayMode(mode) {
+  mode = mode || "fullscreen";
+  if (window.openai && typeof window.openai.requestDisplayMode === "function") {
+    return window.openai.requestDisplayMode({ mode: mode });
+  }
+  return __nitrostack_rpc("ui/request-display-mode", { mode: mode });
+}
+function __nitrostack_setWidgetState(state) {
+  window.openai = window.openai || {};
+  window.openai.widgetState = state;
+  if (typeof window.openai.setWidgetState === "function") {
+    window.openai.setWidgetState(state);
+    return;
+  }
+  __nitrostack_rpc("ui/update-model-context", { structuredContent: { widgetState: state } }).catch(function() {});
+}
+function __nitrostack_readEmbeddedData() {
+  const el = document.getElementById("nitrostack-tool-data");
+  if (!el) return null;
+  const raw = (el.textContent || "").trim();
+  if (!raw || raw === "null") return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+function __nitrostack_readHostData() {
+  const o = window.openai || {};
+  const out = o.toolOutput || o.toolResult || null;
+  if (!out) return __nitrostack_readEmbeddedData();
+  if (out.structuredContent && typeof out.structuredContent === "object") {
+    return out.structuredContent;
+  }
+  const contents = out.content || out.contents;
+  if (Array.isArray(contents)) {
+    const jsonBlock = contents.find(
+      (c) => c && typeof c === "object" && (c.mimeType === "application/json" || c.type === "json")
+    );
+    if (jsonBlock && jsonBlock.text != null) {
+      try {
+        return typeof jsonBlock.text === "string" ? JSON.parse(jsonBlock.text) : jsonBlock.text;
+      } catch (e) {}
+    }
+    const textBlock = contents.find(
+      (c) => c && typeof c === "object" && (c.mimeType === "text/plain" || c.type === "text")
+    );
+    if (textBlock && typeof textBlock.text === "string") {
+      const t = textBlock.text.trim();
+      if (t.startsWith("{") || t.startsWith("[")) {
+        try { return JSON.parse(t); } catch (e) {}
+      }
+    }
+  }
+  if (out && typeof out === "object" && !Array.isArray(out)) return out;
+  return __nitrostack_readEmbeddedData();
+}
+function __nitrostack_applyWidget(force) {
+  if (typeof window.__nitroWidgetRender !== "function") return;
+  const data = __nitrostack_readHostData();
+  if (data == null) return;
+  const ssr = document.body && document.body.getAttribute("data-nitro-ssr") === "1";
+  const needsClient = document.querySelector("[data-nitro-needs-client]");
+  if (ssr && !force && !needsClient) return;
+  if (!force && needsClient && window.__nitroClientReady) return;
+  window.__nitroWidgetRender(data);
+  if (needsClient) window.__nitroClientReady = true;
+}
+function __nitrostack_acceptToolResult(params) {
+  window.openai = window.openai || {};
+  if (params && params.structuredContent != null) {
+    window.openai.toolOutput = { structuredContent: params.structuredContent, content: params.content };
+  } else if (params && params.result && params.result.structuredContent != null) {
+    window.openai.toolOutput = params.result;
+  } else {
+    window.openai.toolOutput = params;
+  }
+  __nitrostack_applyWidget(true);
+}
+function __nitrostack_startMcpAppsHandshake() {
+  __nitrostack_initId = __nitrostack_rpcId++;
+  __nitrostack_postToHost({
+    jsonrpc: "2.0",
+    id: __nitrostack_initId,
+    method: "ui/initialize",
+    params: {
+      protocolVersion: "2026-01-26",
+      appInfo: { name: "nitrostack-widget", version: "1.0.0" },
+      appCapabilities: {
+        availableDisplayModes: ["inline", "fullscreen", "pip"]
+      }
+    }
+  });
+}
+function __nitrostack_bindChrome() {
+  document.addEventListener("click", function(ev) {
+    var callEl = ev.target.closest("[data-call-tool]");
+    if (callEl) {
+      ev.preventDefault();
+      var name = callEl.getAttribute("data-call-tool");
+      var args = {};
+      try { args = JSON.parse(callEl.getAttribute("data-args") || "{}"); } catch (e) {}
+      callEl.classList.add("is-busy");
+      Promise.resolve(__nitrostack_callTool(name, args)).catch(function() {}).finally(function() {
+        callEl.classList.remove("is-busy");
+      });
+      return;
+    }
+    var linkEl = ev.target.closest("[data-open-link]");
+    if (linkEl) {
+      ev.preventDefault();
+      __nitrostack_openLink(linkEl.getAttribute("data-open-link") || linkEl.getAttribute("href"));
+      return;
+    }
+    var modeEl = ev.target.closest("[data-display-mode]");
+    if (modeEl) {
+      ev.preventDefault();
+      __nitrostack_requestDisplayMode(modeEl.getAttribute("data-display-mode") || "fullscreen");
+    }
+  });
+  document.addEventListener("keydown", function(ev) {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    var el = ev.target.closest("[data-call-tool]");
+    if (!el) return;
+    ev.preventDefault();
+    el.click();
+  });
+}
+window.nitrostack = {
+  callTool: __nitrostack_callTool,
+  openLink: __nitrostack_openLink,
+  requestDisplayMode: __nitrostack_requestDisplayMode,
+  setWidgetState: __nitrostack_setWidgetState,
+  readHostData: __nitrostack_readHostData
+};
+function __nitrostack_installHostBridge() {
+  window.addEventListener("openai:set_globals", function(event) {
+    const globals = (event && event.detail && event.detail.globals) || {};
+    window.openai = Object.assign(window.openai || {}, globals);
+    __nitrostack_applyTheme(globals);
+    __nitrostack_applyWidget(true);
+  });
+  window.addEventListener("openai:ready", function() { __nitrostack_applyWidget(true); });
+  window.addEventListener("message", (event) => {
+    const msg = event.data;
+    if (!msg || typeof msg !== "object") return;
+    if (msg.jsonrpc === "2.0" && msg.id != null && __nitrostack_pending[msg.id]) {
+      const pending = __nitrostack_pending[msg.id];
+      delete __nitrostack_pending[msg.id];
+      if (msg.error) pending.reject(msg.error);
+      else pending.resolve(msg.result);
+    }
+    if (msg.jsonrpc === "2.0" && msg.id === __nitrostack_initId && msg.result) {
+      const ctx = msg.result.hostContext || {};
+      window.openai = Object.assign(window.openai || {}, {
+        theme: ctx.theme || window.openai.theme,
+        displayMode: ctx.displayMode || window.openai.displayMode
+      });
+      __nitrostack_applyTheme(ctx);
+      __nitrostack_postToHost({ jsonrpc: "2.0", method: "ui/notifications/initialized" });
+      return;
+    }
+    if (msg.jsonrpc === "2.0" && msg.method === "ui/notifications/host-context-changed") {
+      const ctx = msg.params || {};
+      if (ctx.theme) {
+        window.openai = Object.assign(window.openai || {}, { theme: ctx.theme });
+      }
+      __nitrostack_applyTheme(ctx);
+      return;
+    }
+    if (msg.type === "setGlobals" && msg.globals) {
+      window.openai = Object.assign(window.openai || {}, msg.globals);
+      __nitrostack_applyTheme(msg.globals);
+      __nitrostack_applyWidget(true);
+      return;
+    }
+    if (msg.type === "NITRO_INJECT_OPENAI" && msg.openai) {
+      window.openai = Object.assign(window.openai || {}, msg.openai);
+      __nitrostack_applyTheme(msg.openai);
+      __nitrostack_applyWidget(true);
+      return;
+    }
+    if ((msg.type === "toolOutput" || msg.type === "TOOL_OUTPUT") && msg.data) {
+      window.openai = window.openai || {};
+      window.openai.toolOutput = msg.data;
+      __nitrostack_applyWidget(true);
+      return;
+    }
+    if (msg.jsonrpc === "2.0" && (
+      msg.method === "ui/notifications/tool-result" ||
+      msg.method === "notifications/tool-result"
+    )) {
+      __nitrostack_acceptToolResult(msg.params || {});
+    }
+    if (msg.jsonrpc === "2.0" && msg.method === "ui/notifications/tool-input") {
+      window.openai = window.openai || {};
+      window.openai.toolInput = msg.params;
+    }
+  });
+  __nitrostack_bindChrome();
+  __nitrostack_startMcpAppsHandshake();
+  if (window.openai && window.openai.theme) __nitrostack_applyTheme(window.openai);
+  __nitrostack_applyWidget(false);
+  let n = 0;
+  const poll = setInterval(() => {
+    __nitrostack_applyWidget(false);
+    if (++n > 40) clearInterval(poll);
+  }, 250);
+}
+window.__nitroWidgetRender = function(data) {
+  const list = document.getElementById("list");
+  const meta = document.getElementById("meta");
+  if (!list) return;
+  const offers = (data && (data.offers || data.results)) || [];
+  const params = (data && data.searchParams) || {};
+  const total = (data && data.totalOffers != null) ? data.totalOffers : offers.length;
+  if (meta) {
+    meta.textContent = (params.origin && params.destination)
+      ? (params.origin + " → " + params.destination + " · " + total + " offer" + (total === 1 ? "" : "s"))
+      : (total + " offer" + (total === 1 ? "" : "s"));
+  }
+  list.innerHTML = "";
+  if (!offers.length) {
+    list.innerHTML = '<div class="empty">No flight offers.</div>';
+    return;
+  }
+  function code(p) {
+    if (!p) return "";
+    if (typeof p === "string") return p;
+    return p.iata_code || p.iataCode || p.code || "";
+  }
+  function legs(offer) {
+    if (offer.slices && offer.slices.length) return offer.slices;
+    const out = [];
+    if (offer.outbound) out.push(offer.outbound);
+    if (offer.return) out.push(offer.return);
+    return out;
+  }
+  offers.forEach(function(offer) {
+    const el = document.createElement("article");
+    el.className = "offer ns-card";
+    el.setAttribute("data-call-tool", "get_flight_details");
+    el.setAttribute("data-args", JSON.stringify({ offerId: offer.id || "" }));
+    el.setAttribute("role", "button");
+    el.tabIndex = 0;
+    const amount = offer.total_amount || offer.totalAmount || "";
+    const currency = offer.total_currency || offer.totalCurrency || "";
+    el.innerHTML = '<div class="row"><span class="price"></span><span class="id"></span></div>';
+    el.querySelector(".price").textContent = amount + (currency ? " " + currency : "");
+    el.querySelector(".id").textContent = offer.id || "";
+    legs(offer).forEach(function(sl) {
+      const s = document.createElement("div");
+      s.className = "slice";
+      s.textContent = code(sl.origin) + " → " + code(sl.destination) + " · " + (sl.duration || "");
+      el.appendChild(s);
+    });
+    list.appendChild(el);
+  });
+};
+__nitrostack_installHostBridge();
+  </script>
+</body>
+</html>

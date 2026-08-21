@@ -29,6 +29,13 @@ class DIContainer:
         if not isinstance(token, str):
             self._registry[token] = type(value)
 
+    def has_value(self, token: Any) -> bool:
+        """True when ``register_value`` stored an instance for this token.
+
+        Unlike ``resolve``, this does not auto-instantiate unregistered classes.
+        """
+        return token in self._instances
+
     def resolve(self, token: Any) -> Any:
         """
         Resolve a dependency by token (class type or string key).

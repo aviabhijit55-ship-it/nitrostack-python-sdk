@@ -17,6 +17,8 @@ not provide out of the box:
 - A root documentation page at `GET /` (browsers opening the HTTP port)
 - Chrome DevTools discovery stubs at `GET /json` and `GET /json/version` so
   inspector probes do not 404
+- JSON 404s for OAuth discovery / DCR (`/register`) so MCP Inspector does not
+  treat the HTML landing page as an OAuth error
 - Legacy SSE (`/sse` + `/mcp/messages/`) for older HTTP+SSE-only clients
 
 See `dev-plan/PHASE-3-http-transport.md` for the full scope.
@@ -38,6 +40,9 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from nitrostack.widgets.preview_page import render_preview_page
+from nitrostack.core.di import DIContainer
+from pydantic_core import PydanticUndefined
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
@@ -114,6 +119,7 @@ def _landing_html(name: str, version: str, endpoint: str) -> str:
     <ul>
       <li>Streamable HTTP: <code>POST {mcp_path}</code></li>
       <li>Legacy SSE: <code>GET /sse</code></li>
+      <li>Widget preview: <a href="/widgets/preview"><code>/widgets/preview</code></a></li>
       <li>Health: <a href="{health_path}"><code>{health_path}</code></a></li>
     </ul>
   </main>
@@ -216,6 +222,44 @@ class RequestTraceMiddleware:
             await send(message)
 
         await self.app(scope, traced_receive, traced_send)
+
+
+def _preview_default_arguments(entry: Any) -> Dict[str, Any]:
+    """Prefill live preview with tool examples (shopId, openNow, …)."""
+    examples = getattr(getattr(entry, "config", None), "examples", None)
+    raw = getattr(examples, "input", None) if examples is not None else None
+    if isinstance(raw, dict):
+        return dict(raw)
+    model = getattr(entry, "input_model", None)
+    if model is None:
+        return {}
+    data: Dict[str, Any] = {}
+    for fname, field in getattr(model, "model_fields", {}).items():
+        default = getattr(field, "default", PydanticUndefined)
+        if default is not PydanticUndefined and default is not None:
+            data[fname] = default
+            continue
+        if fname in ("shopId", "shop_id"):
+            data[fname] = "tonys-pizza"
+        elif fname == "product_id":
+            data[fname] = "sku-1"
+        elif fname == "filter":
+            data[fname] = "all"
+        elif fname == "openNow":
+            data[fname] = True
+        elif fname == "origin":
+            data[fname] = "JFK"
+        elif fname == "destination":
+            data[fname] = "LAX"
+        elif fname in ("departureDate", "departure_date"):
+            data[fname] = "2026-09-15"
+        elif fname in ("offerId", "offer_id"):
+            data[fname] = "off_mock123456"
+        elif fname in ("orderId", "order_id"):
+            data[fname] = "ord_mock123456"
+        elif fname == "query":
+            data[fname] = "London"
+    return data
 
 
 class ExactEndpointSlashMiddleware:
@@ -406,6 +450,16 @@ class SessionCapMiddleware:
         return len(self._sessions)
 
 
+def _oauth_is_configured() -> bool:
+    """True when ``OAuthModule.for_root`` registered an ``OAuthService`` instance."""
+    try:
+        from nitrostack.auth.oauth import OAuthService
+
+        return DIContainer.get_instance().has_value(OAuthService)
+    except Exception:
+        return False
+
+
 def build_http_app(
     mcp_app: "McpApplication",
     *,
@@ -504,6 +558,82 @@ def build_http_app(
         meta = _server_meta(mcp_app)
         return HTMLResponse(_landing_html(meta["name"], meta["version"], endpoint))
 
+    async def oauth_not_supported(request):
+        """Inspector DCR posts `/register` when Authentication is on.
+
+        Return JSON (not the HTML 404 page) so the client shows a clear
+        OAuth-off message instead of `Unexpected token '<'`.
+        """
+        return JSONResponse(
+            {
+                "error": "invalid_request",
+                "error_description": (
+                    "This MCP server does not use OAuth. In MCP Inspector turn "
+                    "Authentication off, then connect with Streamable HTTP to "
+                    f"http://localhost:{os.environ.get('PORT') or os.environ.get('MCP_SERVER_PORT') or '3000'}{endpoint}."
+                ),
+            },
+            status_code=404,
+        )
+
+    async def widgets_preview(request):
+        catalog = []
+        for name, entry in getattr(mcp_app, "_tools", {}).items():
+            component = getattr(entry, "component", None)
+            if component is None:
+                continue
+            catalog.append(
+                {
+                    "name": name,
+                    "resourceUri": component.resource_uri,
+                    "arguments": _preview_default_arguments(entry),
+                }
+            )
+        return HTMLResponse(render_preview_page(catalog))
+
+    async def widgets_preview_call(request):
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "JSON body must be an object"}, status_code=400)
+        name = body.get("tool") or ""
+        arguments = body.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            return JSONResponse({"error": "arguments must be an object"}, status_code=400)
+        entry = getattr(mcp_app, "_tools", {}).get(name)
+        if entry is None or getattr(entry, "component", None) is None:
+            return JSONResponse({"error": f"No widget tool named {name!r}"}, status_code=404)
+        try:
+            result = await mcp_app._call_tool(name, arguments)
+        except Exception as exc:
+            logger.exception("Widget preview tool call failed for %s", name)
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        structured = getattr(result, "structuredContent", None)
+        try:
+            html = entry.component.html_with_data(structured)
+        except Exception as exc:
+            logger.exception("Widget preview render failed for %s", name)
+            return JSONResponse(
+                {
+                    "error": f"Widget render failed: {exc}",
+                    "structuredContent": structured,
+                    "html": None,
+                    "resourceUri": entry.component.resource_uri,
+                    "isError": True,
+                },
+                status_code=400,
+            )
+        return JSONResponse(
+            {
+                "structuredContent": structured,
+                "html": html,
+                "resourceUri": entry.component.resource_uri,
+                "isError": bool(getattr(result, "isError", False)),
+            }
+        )
+
     async def json_version(request):
         """Chrome/Cursor DevTools probe `/json/version` when a tab opens localhost."""
         meta = _server_meta(mcp_app)
@@ -542,12 +672,26 @@ def build_http_app(
             )
             yield
 
+    oauth_stub_routes: List[Route] = []
+    if not _oauth_is_configured():
+        # Inspector DCR / discovery stubs. Omit when OAuthModule is registered so
+        # a real protected-resource document is not replaced with "no OAuth".
+        oauth_stub_routes = [
+            Route("/.well-known/oauth-authorization-server", endpoint=oauth_not_supported, methods=["GET", "POST"]),
+            Route("/.well-known/oauth-protected-resource", endpoint=oauth_not_supported, methods=["GET", "POST"]),
+            Route("/register", endpoint=oauth_not_supported, methods=["GET", "POST"]),
+            Route("/oauth/v2/register", endpoint=oauth_not_supported, methods=["GET", "POST"]),
+        ]
+
     routes = [
         # More specific paths MUST come before the catch-all `Mount(endpoint, ...)`
         # below — Starlette matches routes in order, and a `Mount` matches any
         # path under its prefix, so `/mcp/health` would otherwise be swallowed
         # by the `/mcp` mount before ever reaching the health route.
         Route("/", endpoint=root_page, methods=["GET"]),
+        Route("/widgets/preview", endpoint=widgets_preview, methods=["GET"]),
+        Route("/widgets/preview/call", endpoint=widgets_preview_call, methods=["POST"]),
+        *oauth_stub_routes,
         Route("/json/version", endpoint=json_version, methods=["GET"]),
         Route("/json/list", endpoint=json_list, methods=["GET"]),
         Route("/json", endpoint=json_list, methods=["GET"]),

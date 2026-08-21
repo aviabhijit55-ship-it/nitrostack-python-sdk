@@ -16,6 +16,32 @@ from nitrostack.auth.oauth_module import (
     is_client_registration_enabled,
 )
 
+
+def is_oauth_required() -> bool:
+    """TS ``OAuthModule.isAuthRequired()`` — Studio/local default is off.
+
+    Set ``OAUTH_REQUIRED=true`` to enforce Bearer tokens. Unset/false lets
+    NitroStudio and Inspector call tools against mock Duffel data.
+    """
+    return (os.environ.get("OAUTH_REQUIRED") or "").strip().lower() == "true"
+
+
+_oauth_fail_open_warned = False
+
+
+def warn_if_oauth_fail_open() -> None:
+    """Loud warning when OAuth is wired but tokens are not enforced."""
+    global _oauth_fail_open_warned
+    if _oauth_fail_open_warned or is_oauth_required():
+        return
+    _oauth_fail_open_warned = True
+    sys.stderr.write(
+        "WARNING: OAuth is configured but OAUTH_REQUIRED is not true. "
+        "Tools protected by OAuthGuard will accept unauthenticated requests. "
+        "Set OAUTH_REQUIRED=true to enforce Bearer tokens.\n"
+    )
+    sys.stderr.flush()
+
 class OAuthService:
     def __init__(
         self,
@@ -352,4 +378,9 @@ class OAuthModule:
             static_client_secret=static_client_secret,
         )
         DIContainer.get_instance().register_value(OAuthService, service)
+        warn_if_oauth_fail_open()
         return cls
+
+    @staticmethod
+    def is_auth_required() -> bool:
+        return is_oauth_required()

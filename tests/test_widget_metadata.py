@@ -2,77 +2,104 @@ import asyncio
 import os
 import sys
 
-# Ensure parent directory is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from nitrostack import injectable, tool, widget, module, ExecutionContext
+from nitrostack import injectable, tool, widget, module, ExecutionContext, WidgetOptions
 from nitrostack.core.decorators import widget_resource_uri
 from nitrostack.testing import NitroTestingModule
 from pydantic import BaseModel
 import mcp.types as types
 
+
 class DummyInput(BaseModel):
     pass
+
+
+class DummyOutput(BaseModel):
+    status: str
+
 
 @injectable()
 class WidgetController:
     @tool(
         name="widget_tool",
         description="A tool with a widget",
-        input_schema=DummyInput
+        input_schema=DummyInput,
+        output_schema=DummyOutput,
     )
     @widget("my-custom-widget-route")
     async def widget_tool(self, input: DummyInput, context: ExecutionContext) -> dict:
         return {"status": "ok"}
 
-@module(
-    name="widget_test",
-    controllers=[WidgetController]
-)
+    @tool(
+        name="widget_tool_object",
+        description="Widget via WidgetOptions",
+        input_schema=DummyInput,
+    )
+    @widget(WidgetOptions(route="object-route", prefers_border=True))
+    async def widget_tool_object(self, input: DummyInput, context: ExecutionContext) -> dict:
+        return {"status": "ok"}
+
+
+@module(name="widget_test", controllers=[WidgetController])
 class WidgetTestModule:
     pass
 
-async def main():
-    print("Testing widget decorator metadata mapping...")
-    
-    # 1. Initialize test harness
-    harness = await NitroTestingModule.create(WidgetTestModule)
-    
-    # 2. Extract tools by invoking the registered `tools/list` handler directly
-    #    (the owned low-level Server has no FastMCP-style `list_tools()` convenience method)
-    list_tools_handler = harness.app.mcp_server.request_handlers[types.ListToolsRequest]
-    list_result = await list_tools_handler(None)
-    tools = list_result.root.tools
 
-    # Find our tool
-    target_tool = None
-    for t in tools:
-        if t.name == "widget_tool":
-            target_tool = t
-            break
-            
-    assert target_tool is not None, "widget_tool was not registered"
-    
-    print("Registered tool representation:", target_tool)
-    
-    # Verify metadata fields are present
-    meta = getattr(target_tool, "meta", None)
-    if meta is None:
-        meta = getattr(target_tool, "_meta", {})
-        
-    assert meta is not None, "Tool metadata is missing"
-    print("Tool metadata:", meta)
-    
-    # Check that widget fields are populated in metadata
-    assert meta.get("ui/template") == "ui://widget/my-custom-widget-route.html"
-    assert meta.get("openai/outputTemplate") == "ui://widget/my-custom-widget-route.html"
-    assert meta.get("ui") == {"resourceUri": "ui://widget/my-custom-widget-route.html"}
-    
-    print("Success! Widget metadata is correctly mapped and verified in the MCP Tool specification.")
+def _tool_meta(tool: types.Tool) -> dict:
+    return getattr(tool, "meta", None) or getattr(tool, "_meta", {}) or {}
 
 
-def test_widget_metadata_on_listed_tool():
-    asyncio.run(main())
+async def _list_tools_for_mode(mode: str | None):
+    old = os.environ.get("NITROSTACK_APP_MODE")
+    if mode is None:
+        os.environ.pop("NITROSTACK_APP_MODE", None)
+    else:
+        os.environ["NITROSTACK_APP_MODE"] = mode
+    try:
+        harness = await NitroTestingModule.create(WidgetTestModule)
+        handler = harness.app.mcp_server.request_handlers[types.ListToolsRequest]
+        result = await handler(None)
+        return result.root.tools
+    finally:
+        if old is None:
+            os.environ.pop("NITROSTACK_APP_MODE", None)
+        else:
+            os.environ["NITROSTACK_APP_MODE"] = old
+
+
+def test_widget_metadata_openai_mode():
+    tools = asyncio.run(_list_tools_for_mode("openai"))
+    target = next(t for t in tools if t.name == "widget_tool")
+    meta = _tool_meta(target)
+    uri = "ui://widget/my-custom-widget-route.html"
+    assert meta.get("ui/template") == uri
+    assert meta.get("openai/outputTemplate") == uri
+    assert "ui" not in meta
+    assert getattr(target, "outputTemplate", None) == uri
+    schema = getattr(target, "outputSchema", None)
+    assert isinstance(schema, dict)
+    assert "status" in (schema.get("properties") or {})
+
+
+def test_widget_metadata_mcp_app_mode():
+    tools = asyncio.run(_list_tools_for_mode("mcp-app"))
+    target = next(t for t in tools if t.name == "widget_tool")
+    meta = _tool_meta(target)
+    uri = "ui://widget/my-custom-widget-route.html"
+    assert meta.get("ui/template") == uri
+    assert meta.get("ui") == {"resourceUri": uri, "visibility": "visible"}
+    assert "openai/outputTemplate" not in meta
+
+
+def test_widget_metadata_object_form_universal():
+    tools = asyncio.run(_list_tools_for_mode("universal"))
+    target = next(t for t in tools if t.name == "widget_tool_object")
+    meta = _tool_meta(target)
+    uri = "ui://widget/object-route.html"
+    assert meta.get("openai/outputTemplate") == uri
+    assert meta["ui"]["resourceUri"] == uri
+    assert meta["ui"]["prefersBorder"] is True
 
 
 def test_widget_resource_uri_normalization():
@@ -87,4 +114,7 @@ def test_widget_resource_uri_normalization():
 
 if __name__ == "__main__":
     test_widget_resource_uri_normalization()
-    asyncio.run(main())
+    test_widget_metadata_openai_mode()
+    test_widget_metadata_mcp_app_mode()
+    test_widget_metadata_object_form_universal()
+    print("widget metadata tests passed.")

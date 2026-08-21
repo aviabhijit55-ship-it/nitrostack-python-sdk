@@ -67,7 +67,12 @@ _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
 
 def _validate_generate_name(name: str) -> None:
-    if not name or not _NAME_RE.match(name):
+    if (
+        not name
+        or os.path.basename(name) != name
+        or ".." in name
+        or not _NAME_RE.match(name)
+    ):
         print("Error: name must be a valid identifier (letters, numbers, '_' or '-').")
         sys.exit(1)
 

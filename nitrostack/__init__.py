@@ -12,6 +12,7 @@ from nitrostack.core.decorators import (
     PromptMessage,
     ToolInvocation,
     ToolExamples,
+    widget_resource_uri,
 )
 from nitrostack.core.context import (
     ExecutionContext,
@@ -81,6 +82,22 @@ from nitrostack.auth.config import (
     ConfigModule,
     ConfigService,
 )
+from nitrostack.widgets import (
+    Component,
+    WidgetCsp,
+    WidgetOptions,
+    create_component,
+    get_app_mode,
+    get_widget_mime_type,
+    is_mcp_app_mode,
+    is_openai_mode,
+    OPENAI_SKYBRIDGE_MIME_TYPE,
+    RESOURCE_MIME_TYPE_MCP_APP,
+    RESOURCE_MIME_TYPE_OPENAI,
+)
+from nitrostack.testing import (
+    NitroTestingModule,
+)
 from nitrostack.testing import (
     NitroTestingModule,
 )
@@ -141,4 +158,17 @@ __all__ = [
     "TaskAlreadyTerminalError",
     "InvalidTaskTransitionError",
     "TaskExpiredError",
+    "widget_resource_uri",
+    "Component",
+    "WidgetCsp",
+    "WidgetOptions",
+    "create_component",
+    "get_app_mode",
+    "get_widget_mime_type",
+    "is_mcp_app_mode",
+    "is_openai_mode",
+    "OPENAI_SKYBRIDGE_MIME_TYPE",
+    "RESOURCE_MIME_TYPE_MCP_APP",
+    "RESOURCE_MIME_TYPE_OPENAI",
+    "NitroTestingModule",
 ]
