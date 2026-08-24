@@ -1,6 +1,7 @@
-import sys
 import inspect
-from typing import Any, Callable, Dict, List, Tuple, Optional
+import sys
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
 
 class EventEmitter:
     _instance = None
@@ -29,23 +30,61 @@ class EventEmitter:
     def bind_instance(self, event_name: str, func: Callable, instance: Any) -> None:
         if event_name not in self._bound_listeners:
             self._bound_listeners[event_name] = []
-        
-        # Bind the unbound method to the class instance
-        # Standard Python descriptor binding: func.__get__(instance, type(instance))
+
         bound_func = func.__get__(instance, type(instance))
         self._bound_listeners[event_name].append(bound_func)
 
+    def on(self, event_name: str, listener: Callable) -> None:
+        self._bound_listeners.setdefault(event_name, []).append(listener)
+
+    def off(self, event_name: str, listener: Callable) -> None:
+        bound = self._bound_listeners.get(event_name)
+        if not bound:
+            return
+        self._bound_listeners[event_name] = [item for item in bound if item is not listener]
+
+    def once(self, event_name: str, listener: Callable) -> Callable:
+        def wrapper(payload: Any):
+            self.off(event_name, wrapper)
+            return listener(payload)
+
+        self.on(event_name, wrapper)
+        return wrapper
+
+    def listener_count(self, event_name: str) -> int:
+        return len(self._bound_listeners.get(event_name, []))
+
+    def event_names(self) -> List[str]:
+        return [name for name, items in self._bound_listeners.items() if items]
+
+    def remove_all_listeners(self, event_name: Optional[str] = None) -> None:
+        if event_name is None:
+            self._bound_listeners.clear()
+            return
+        self._bound_listeners.pop(event_name, None)
+
     async def emit(self, event_name: str, payload: Any) -> None:
-        listeners = self._bound_listeners.get(event_name, [])
+        listeners = list(self._bound_listeners.get(event_name, []))
         for listener in listeners:
             try:
-                if inspect.iscoroutinefunction(listener):
-                    await listener(payload)
-                else:
-                    listener(payload)
+                result = listener(payload)
+                if inspect.iscoroutine(result):
+                    await result
             except Exception as e:
                 sys.stderr.write(f"Event emitter error: handler for '{event_name}' failed: {e}\n")
                 sys.stderr.flush()
+
+    def emit_sync(self, event_name: str, payload: Any) -> None:
+        listeners = list(self._bound_listeners.get(event_name, []))
+        for listener in listeners:
+            try:
+                result = listener(payload)
+                if inspect.iscoroutine(result):
+                    result.close()
+            except Exception as e:
+                sys.stderr.write(f"Event emitter error: handler for '{event_name}' failed: {e}\n")
+                sys.stderr.flush()
+
 
 def on_event(event_name: str):
     """

@@ -17,6 +17,7 @@ class DIContainer:
     def __init__(self):
         self._registry: Dict[Any, Type] = {}
         self._instances: Dict[Any, Any] = {}
+        self._resolving: set = set()
 
     def register(self, cls: Type) -> None:
         """Register a provider class."""
@@ -59,17 +60,25 @@ class DIContainer:
         if cls is None:
             raise DependencyResolutionError(f"Dependency '{token}' is not registered in the DIContainer.")
 
+        cycle_key = cls
+        if cycle_key in self._resolving:
+            chain = " -> ".join(getattr(item, "__name__", str(item)) for item in (*self._resolving, cycle_key))
+            raise DependencyResolutionError(f"Circular dependency detected: {chain}")
+
         # 4. Resolve dependencies of the class
         deps = getattr(cls, "_mcp_deps", [])
         resolved_args = []
-        for dep in deps:
-            resolved_args.append(self.resolve(dep))
-
-        # 5. Instantiate the class
+        self._resolving.add(cycle_key)
         try:
+            for dep in deps:
+                resolved_args.append(self.resolve(dep))
             instance = cls(*resolved_args)
+        except DependencyResolutionError:
+            raise
         except Exception as e:
             raise DependencyResolutionError(f"Failed to instantiate class '{cls.__name__}' due to: {e}") from e
+        finally:
+            self._resolving.discard(cycle_key)
 
         # 6. Cache and return the singleton instance
         self._instances[token] = instance

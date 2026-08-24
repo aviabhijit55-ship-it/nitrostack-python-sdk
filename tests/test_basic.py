@@ -75,5 +75,9 @@ async def run_tests():
 
     print("\nAll integration tests passed successfully!")
 
+def test_calculator_server_integration():
+    asyncio.run(run_tests())
+
+
 if __name__ == "__main__":
     asyncio.run(run_tests())
