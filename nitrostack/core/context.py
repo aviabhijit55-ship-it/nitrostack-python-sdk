@@ -83,6 +83,7 @@ class AuthContext:
     exp: int | None = None           # expiration timestamp
     iat: int | None = None           # issued-at timestamp
     iss: str | None = None           # issuer URL
+    aud: List[str] | None = None     # audience(s) this token was issued for (RFC 8707)
     claims: Dict[str, Any] = field(default_factory=dict)  # custom claims
     token_payload: Any = None        # full decoded token
 
