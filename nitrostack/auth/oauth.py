@@ -234,20 +234,8 @@ class OAuthService:
         self._thread = threading.Thread(target=run_server, daemon=True)
         self._thread.start()
 
-    def _audience_ok(self, token_info: Dict[str, Any]) -> bool:
-        """RFC 8707 resource indicator / JWT ``aud`` must match configured audience."""
-        expected = self.audience
-        if not expected:
-            return True
-        actual = token_info.get("aud", token_info.get("resource"))
-        if actual is None:
-            return False
-        if isinstance(actual, list):
-            return expected in actual
-        return actual == expected
-
     def raise_if_invalid(self, token_info: Dict[str, Any]) -> Dict[str, Any]:
-        """Raise ``TokenInactiveError`` / ``AudienceMismatchError`` for filter tests."""
+        """Raise ``TokenInactiveError`` / ``AudienceMismatchError`` for an introspection result."""
         if token_info.get("error") == "audience_mismatch" or (
             token_info.get("active") and not self._validate_audience(token_info)
         ):

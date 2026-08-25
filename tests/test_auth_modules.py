@@ -130,7 +130,7 @@ def test_jwt_parses_expires_in_units(monkeypatch):
         assert payload["exp"] >= now + minimum
 
 
-def test_config_env_comments_quotes_and_get_or_throw(tmp_path):
+def test_config_env_comments_quotes_and_get_or_throw(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text(
         "# comment line\n\nQUOTED=\"hello world\"\nSINGLE='one'\nBARE=plain\n",
@@ -149,11 +149,15 @@ def test_config_env_comments_quotes_and_get_or_throw(tmp_path):
     except KeyError:
         pass
 
+    # ConfigService leaks env-file values into os.environ; undo that so the
+    # ignore_env_file half of this test actually proves the file is skipped.
+    for leaked in ("QUOTED", "SINGLE", "BARE"):
+        monkeypatch.delenv(leaked, raising=False)
     DIContainer.reset()
     ConfigModule.for_root(env_file_path=str(env_file), ignore_env_file=True, defaults={"ONLY": "default"})
     ignored = DIContainer.get_instance().resolve(ConfigService)
     assert ignored.get("ONLY") == "default"
-    assert ignored.get("BARE") != "plain" or ignored.get("ONLY") == "default"
+    assert ignored.get("BARE") is None
 
 
 def test_config_unreadable_env_file_writes_stderr(tmp_path, capsys):
@@ -161,7 +165,8 @@ def test_config_unreadable_env_file_writes_stderr(tmp_path, capsys):
     blocked.mkdir()
     ConfigModule.for_root(env_file_path=str(blocked), defaults={"OK": "1"})
     captured = capsys.readouterr()
-    assert "ConfigModule" in captured.err or "Failed" in captured.err or captured.err == captured.err
+    assert "ConfigModule warning" in captured.err
+    assert "Failed to read" in captured.err
     assert DIContainer.get_instance().resolve(ConfigService).get("OK") == "1"
 
 

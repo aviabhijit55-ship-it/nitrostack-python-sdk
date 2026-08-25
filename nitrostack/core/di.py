@@ -17,7 +17,8 @@ class DIContainer:
     def __init__(self):
         self._registry: Dict[Any, Type] = {}
         self._instances: Dict[Any, Any] = {}
-        self._resolving: set = set()
+        # List (not set) so the circular-dependency error reports the chain in order.
+        self._resolving: list = []
 
     def register(self, cls: Type) -> None:
         """Register a provider class."""
@@ -68,7 +69,7 @@ class DIContainer:
         # 4. Resolve dependencies of the class
         deps = getattr(cls, "_mcp_deps", [])
         resolved_args = []
-        self._resolving.add(cycle_key)
+        self._resolving.append(cycle_key)
         try:
             for dep in deps:
                 resolved_args.append(self.resolve(dep))
@@ -78,7 +79,7 @@ class DIContainer:
         except Exception as e:
             raise DependencyResolutionError(f"Failed to instantiate class '{cls.__name__}' due to: {e}") from e
         finally:
-            self._resolving.discard(cycle_key)
+            self._resolving.remove(cycle_key)
 
         # 6. Cache and return the singleton instance
         self._instances[token] = instance

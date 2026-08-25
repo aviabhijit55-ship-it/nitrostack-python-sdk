@@ -75,6 +75,8 @@ omit = [
 [tool.coverage.report]
 show_missing = true
 skip_empty = true
+# Phase 6 DoD floor; current suite measures ~86%.
+fail_under = 50
 exclude_lines = [
     "pragma: no cover",
     "if TYPE_CHECKING:",

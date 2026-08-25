@@ -230,3 +230,37 @@ def test_http_jwt_guard_allows_valid_token_and_rejects_missing(monkeypatch):
     content = payload.get("structuredContent") or {}
     assert content.get("hello") == "ADA"
     assert content.get("sub") == "ada"
+
+
+def test_transport_headers_take_precedence_over_meta():
+    """Client-controlled _meta must not override real transport credentials."""
+    from nitrostack.core.app import _auth_metadata_from_request_ctx
+
+    class FakeRequest:
+        headers = {"authorization": "Bearer real-token", "x-api-key": "real-key"}
+
+    class FakeCtx:
+        meta = {
+            "authorization": "Bearer meta-token",
+            "x-api-key": "meta-key",
+            "_oauth": "meta-oauth",
+        }
+        request = FakeRequest()
+
+    extra = _auth_metadata_from_request_ctx(FakeCtx())
+    assert extra["authorization"] == "Bearer real-token"
+    assert extra["x-api-key"] == "real-key"
+    # _meta-only slots with no transport counterpart still pass through.
+    assert extra["_oauth"] == "meta-oauth"
+
+
+def test_meta_auth_used_when_transport_has_no_headers():
+    """STDIO-style contexts (no HTTP request) fall back to _meta auth."""
+    from nitrostack.core.app import _auth_metadata_from_request_ctx
+
+    class FakeCtx:
+        meta = {"authorization": "Bearer meta-token"}
+        request = None
+
+    extra = _auth_metadata_from_request_ctx(FakeCtx())
+    assert extra["authorization"] == "Bearer meta-token"

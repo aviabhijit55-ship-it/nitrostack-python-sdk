@@ -692,6 +692,17 @@ def test_raise_if_invalid_and_www_authenticate():
     except AudienceMismatchError:
         pass
 
+    # Active token whose aud does not match the configured audience must raise
+    # via the _validate_audience branch (not just the explicit error sentinel).
+    try:
+        service.raise_if_invalid({"active": True, "aud": "https://other.example.com"})
+        raise AssertionError("active token with wrong audience should raise")
+    except AudienceMismatchError:
+        pass
+
+    ok = {"active": True, "aud": "http://localhost/mcp", "sub": "u1"}
+    assert service.raise_if_invalid(ok) is ok
+
     header = generate_www_authenticate_header(
         realm="mcp",
         resource_metadata="http://localhost/.well-known/oauth-protected-resource",
@@ -991,25 +1002,3 @@ if __name__ == "__main__":
     test_discovery_server_idempotent_start_and_dcr_http()
     test_discovery_dcr_404_when_disabled_or_missing_client_id()
     test_stop_discovery_when_never_started()
-
-
-
-def test_audience_ok_leftover_helper():
-    service = OAuthService(
-        resource_uri="https://api.example.com",
-        authorization_servers=["https://idp.example.com"],
-        scopes_supported=["read"],
-        audience="https://api.example.com",
-    )
-    assert service._audience_ok({"aud": "https://api.example.com"}) is True
-    assert service._audience_ok({"aud": ["https://api.example.com", "https://other"]}) is True
-    assert service._audience_ok({"aud": "https://other.example.com"}) is False
-    assert service._audience_ok({}) is False
-    # audience defaults to resource_uri, so a missing aud claim is not ok
-    defaulted = OAuthService(
-        resource_uri="https://api.example.com",
-        authorization_servers=["https://idp.example.com"],
-        scopes_supported=["read"],
-    )
-    assert defaulted.audience == "https://api.example.com"
-    assert defaulted._audience_ok({}) is False

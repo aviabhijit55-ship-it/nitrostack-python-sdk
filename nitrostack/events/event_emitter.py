@@ -81,6 +81,11 @@ class EventEmitter:
                 result = listener(payload)
                 if inspect.iscoroutine(result):
                     result.close()
+                    sys.stderr.write(
+                        f"Event emitter warning: async handler for '{event_name}' "
+                        "cannot run inside emit_sync; use 'await emit()' instead\n"
+                    )
+                    sys.stderr.flush()
             except Exception as e:
                 sys.stderr.write(f"Event emitter error: handler for '{event_name}' failed: {e}\n")
                 sys.stderr.flush()

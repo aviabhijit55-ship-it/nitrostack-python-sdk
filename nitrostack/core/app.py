@@ -243,7 +243,14 @@ _AUTH_META_KEYS = ("authorization", "x-api-key", "token", "_oauth", "headers")
 
 
 def _auth_metadata_from_request_ctx(rc: Any) -> Dict[str, Any]:
-    """Copy host-sent auth slots from MCP request ``_meta`` into ExecutionContext."""
+    """Copy host-sent auth slots from MCP request ``_meta`` into ExecutionContext.
+
+    Real transport headers (``rc.request.headers``) take precedence over
+    client-supplied ``_meta`` values: ``_meta`` is part of the JSON-RPC payload
+    and fully client-controlled, so it must not override credentials that were
+    presented (or vetted) at the transport layer. ``_meta`` remains the only
+    source on transports without HTTP headers (e.g. STDIO).
+    """
     extra: Dict[str, Any] = {}
     if rc is None:
         return extra
@@ -298,10 +305,10 @@ def _auth_metadata_from_request_ctx(rc: Any) -> Dict[str, Any]:
     if headers_obj is not None:
         try:
             http_auth = headers_obj.get("authorization") or headers_obj.get("Authorization")
-            if isinstance(http_auth, str) and http_auth.strip() and "authorization" not in extra:
+            if isinstance(http_auth, str) and http_auth.strip():
                 extra["authorization"] = http_auth
-            http_key = headers_obj.get("x-api-key")
-            if isinstance(http_key, str) and http_key.strip() and "x-api-key" not in extra:
+            http_key = headers_obj.get("x-api-key") or headers_obj.get("X-API-Key")
+            if isinstance(http_key, str) and http_key.strip():
                 extra["x-api-key"] = http_key
         except Exception:
             pass
@@ -809,7 +816,6 @@ class McpApplication:
             )
         )
         return content
-
 
     async def _call_tool(self, name: str, arguments: Dict[str, Any]):
         entry = self._tools.get(name)

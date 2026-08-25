@@ -1,6 +1,7 @@
 """Scope helpers for AuthContext (TS ``hasScope`` / ``@RequireScopes``)."""
 from __future__ import annotations
 
+import inspect
 from functools import wraps
 from typing import Any, Callable, Iterable, Sequence
 
@@ -31,7 +32,10 @@ def has_all_scopes(auth: AuthContext | None, scopes: Iterable[str]) -> bool:
 
 
 def require_scopes(*needed: str) -> Callable:
-    """Reject the handler when ``context.auth`` is missing any of ``needed``."""
+    """Reject the handler when ``context.auth`` is missing any of ``needed``.
+
+    Works with async and sync handlers; the wrapper itself is always async.
+    """
 
     def decorator(func: Callable) -> Callable:
         @wraps(func)
@@ -47,7 +51,10 @@ def require_scopes(*needed: str) -> Callable:
                 raise PermissionError("Not authenticated")
             if needed and not has_all_scopes(auth, needed):
                 raise PermissionError(f"Missing required scopes: {', '.join(needed)}")
-            return await func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
 
         return wrapper
 
