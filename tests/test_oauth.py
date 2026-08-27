@@ -572,6 +572,401 @@ def test_introspection_client_credentials_resolve_from_env():
     print("Success! Introspection client credentials resolve from the environment.")
 
 
+def test_for_root_requires_resource_and_servers():
+    DIContainer.reset()
+    from nitrostack.core.errors import ConfigurationError
+
+    try:
+        OAuthModule.for_root(
+            resource_uri="",
+            authorization_servers=["http://auth.example"],
+            scopes_supported=["read"],
+        )
+        raise AssertionError("empty resource_uri should fail")
+    except ConfigurationError:
+        pass
+
+    try:
+        OAuthModule.for_root(
+            resource_uri="http://localhost/mcp",
+            authorization_servers=[],
+            scopes_supported=["read"],
+        )
+        raise AssertionError("empty authorization_servers should fail")
+    except ConfigurationError:
+        pass
+
+
+def test_introspect_http_active_and_inactive():
+    DIContainer.reset()
+    OAuthModule.for_root(
+        resource_uri="http://localhost/mcp",
+        authorization_servers=["http://auth.example"],
+        scopes_supported=["read"],
+        token_introspection_endpoint="http://auth.example/introspect",
+        token_introspection_client_id="cid",
+        token_introspection_client_secret="csecret",
+        audience="http://localhost/mcp",
+    )
+    service = DIContainer.get_instance().resolve(OAuthService)
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def read(self):
+            import json
+
+            return json.dumps(self._payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    with patch("urllib.request.urlopen", return_value=_Resp({"active": True, "sub": "u1", "aud": "http://localhost/mcp", "scope": "read"})):
+        info = asyncio.run(service.introspect_token("tok-ok"))
+    assert info["active"] is True
+    assert info["sub"] == "u1"
+
+    with patch("urllib.request.urlopen", return_value=_Resp({"active": False})):
+        info = asyncio.run(service.introspect_token("tok-dead"))
+    assert info["active"] is False
+
+    with patch("urllib.request.urlopen", return_value=_Resp({"active": True, "aud": "https://other.example"})):
+        info = asyncio.run(service.introspect_token("tok-aud"))
+    assert info["active"] is False
+
+    with patch("urllib.request.urlopen", side_effect=OSError("down")):
+        info = asyncio.run(service.introspect_token("tok-err"))
+    assert info["active"] is False
+
+
+def test_introspect_jwks_success_and_failure():
+    DIContainer.reset()
+    OAuthModule.for_root(
+        resource_uri="http://localhost/mcp",
+        authorization_servers=["http://auth.example"],
+        scopes_supported=["read"],
+        jwks_uri="https://auth.example/jwks",
+        audience="http://localhost/mcp",
+    )
+    service = DIContainer.get_instance().resolve(OAuthService)
+
+    with patch("jwt.PyJWKClient") as mock_client_cls, patch("jwt.decode") as mock_decode:
+        mock_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "pub"
+        mock_decode.return_value = {"sub": "jwks-user", "aud": "http://localhost/mcp", "scope": "read"}
+        info = asyncio.run(service.introspect_token("a.b.c"))
+    assert info["active"] is True
+    assert info["sub"] == "jwks-user"
+
+    service._jwks_clients.clear()
+    service._token_cache.clear()
+    with patch("jwt.PyJWKClient") as mock_client_cls, patch("jwt.decode") as mock_decode:
+        mock_client_cls.return_value.get_signing_key_from_jwt.return_value.key = "pub"
+        mock_decode.side_effect = ValueError("bad sig")
+        info = asyncio.run(service.introspect_token("a.b.c"))
+    assert info["active"] is False
+
+
+def test_raise_if_invalid_and_www_authenticate():
+    DIContainer.reset()
+    OAuthModule.for_root(
+        resource_uri="http://localhost/mcp",
+        authorization_servers=["http://auth.example"],
+        scopes_supported=["read"],
+        audience="http://localhost/mcp",
+    )
+    service = DIContainer.get_instance().resolve(OAuthService)
+    from nitrostack import AudienceMismatchError, TokenInactiveError, generate_www_authenticate_header
+
+    try:
+        service.raise_if_invalid({"active": False})
+        raise AssertionError("inactive should raise")
+    except TokenInactiveError:
+        pass
+    try:
+        service.raise_if_invalid({"active": False, "error": "audience_mismatch", "aud": "x"})
+        raise AssertionError("audience should raise")
+    except AudienceMismatchError:
+        pass
+
+    # Active token whose aud does not match the configured audience must raise
+    # via the _validate_audience branch (not just the explicit error sentinel).
+    try:
+        service.raise_if_invalid({"active": True, "aud": "https://other.example.com"})
+        raise AssertionError("active token with wrong audience should raise")
+    except AudienceMismatchError:
+        pass
+
+    ok = {"active": True, "aud": "http://localhost/mcp", "sub": "u1"}
+    assert service.raise_if_invalid(ok) is ok
+
+    header = generate_www_authenticate_header(
+        realm="mcp",
+        resource_metadata="http://localhost/.well-known/oauth-protected-resource",
+        error="invalid_token",
+        error_description='expired',
+    )
+    assert header.startswith("Bearer realm=")
+    assert "resource_metadata=" in header
+    assert "invalid_token" in header
+
+
+def test_oauth_guard_token_slots(monkeypatch):
+    DIContainer.reset()
+    monkeypatch.setenv("OAUTH_REQUIRED", "true")
+    OAuthModule.for_root(
+        resource_uri="http://localhost/mcp",
+        authorization_servers=["http://auth.example"],
+        scopes_supported=["read"],
+        token_introspection_endpoint="http://auth.example/introspect",
+    )
+    service = DIContainer.get_instance().resolve(OAuthService)
+    guard = OAuthGuard()
+    payload = {"active": True, "sub": "slot-user", "scope": "read"}
+
+    ctx = ExecutionContext(
+        request_id="s",
+        tool_name="t",
+        logger=MagicMock(),
+        metadata={"headers": {"Authorization": "Bearer slot-token"}},
+    )
+    with patch.object(service, "introspect_token", return_value=payload) as mock:
+        assert asyncio.run(guard.can_activate(ctx)) is True
+        mock.assert_called_once_with("slot-token")
+        assert ctx.auth.subject == "slot-user"
+
+    ctx2 = ExecutionContext(
+        request_id="s2",
+        tool_name="t",
+        logger=MagicMock(),
+        metadata={"_oauth": "meta-token"},
+    )
+    with patch.object(service, "introspect_token", return_value=payload) as mock:
+        assert asyncio.run(guard.can_activate(ctx2)) is True
+        mock.assert_called_once_with("meta-token")
+
+
+def test_audience_defaults_to_resource_uri_or_custom():
+    defaulted = OAuthService(
+        resource_uri="https://api.example.com/mcp",
+        authorization_servers=["https://idp.example.com"],
+        scopes_supported=["read"],
+    )
+    assert defaulted.audience == "https://api.example.com/mcp"
+
+    custom = OAuthService(
+        resource_uri="https://api.example.com/mcp",
+        authorization_servers=["https://idp.example.com"],
+        scopes_supported=["read"],
+        audience="custom-audience",
+    )
+    assert custom.audience == "custom-audience"
+
+
+def test_token_cache_disabled_when_ttl_zero():
+    service = OAuthService(
+        resource_uri="https://api.example.com",
+        authorization_servers=["https://idp.example.com"],
+        scopes_supported=["read"],
+        token_cache_seconds=0,
+    )
+    service._cache_set("t1", {"active": True})
+    assert service._cache_get("t1") is None
+
+
+def test_oauth_guard_required_rejects_wrong_audience_end_to_end():
+    """TS oauth.extended: valid-looking token with wrong aud is rejected when required."""
+    DIContainer.reset()
+    os.environ["OAUTH_REQUIRED"] = "true"
+    try:
+        OAuthModule.for_root(
+            resource_uri="https://api.example.com",
+            authorization_servers=["https://idp.example.com"],
+            scopes_supported=["read"],
+            token_introspection_endpoint="https://idp.example.com/introspect",
+            audience="https://api.example.com",
+        )
+        service = DIContainer.get_instance().resolve(OAuthService)
+        guard = OAuthGuard()
+        ctx = ExecutionContext(
+            request_id="aud-e2e",
+            tool_name="t",
+            logger=MagicMock(),
+            metadata={"authorization": "Bearer looks-valid"},
+        )
+        with patch.object(
+            service,
+            "_introspect_via_endpoint",
+            return_value={"active": True, "aud": "https://other.example.com", "sub": "u"},
+        ):
+            assert asyncio.run(guard.can_activate(ctx)) is False
+    finally:
+        os.environ.pop("OAUTH_REQUIRED", None)
+        DIContainer.reset()
+
+
+def _oauth_free_port() -> int:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _http(port: int, method: str, path: str, body: bytes | None = None, content_type: str | None = None):
+    import http.client
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+    try:
+        headers = {"Connection": "close"}
+        if content_type:
+            headers["Content-Type"] = content_type
+        conn.request(method, path, body=body, headers=headers)
+        resp = conn.getresponse()
+        return resp.status, resp.read()
+    finally:
+        conn.close()
+
+
+def _wait_discovery(port: int, path: str = "/.well-known/oauth-protected-resource"):
+    import json
+
+    last_error = None
+    for _ in range(40):
+        try:
+            status, raw = _http(port, "GET", path)
+            if status == 200:
+                return status, json.loads(raw.decode("utf-8"))
+            last_error = f"HTTP {status}: {raw[:200]!r}"
+        except Exception as exc:
+            last_error = exc
+        time.sleep(0.05)
+    raise AssertionError(f"discovery server on {port} did not start: {last_error}")
+
+
+def test_discovery_server_idempotent_start_and_dcr_http(monkeypatch):
+    """TS oauth-module.discovery: DCR 404/200 + no leaked hardcoded secrets over live HTTP."""
+    import json
+
+    DIContainer.reset()
+    port = _oauth_free_port()
+    monkeypatch.setenv("OAUTH_DISCOVERY_PORT", str(port))
+    OAuthModule.for_root(
+        resource_uri="https://api.example.com",
+        authorization_servers=["https://idp.example.com"],
+        scopes_supported=["read"],
+        discovery_port=port,
+        enable_client_registration=True,
+        static_client_id="configured-client",
+        static_client_secret="configured-secret",
+    )
+    service = DIContainer.get_instance().resolve(OAuthService)
+    service.start_discovery_server()
+    try:
+        _wait_discovery(port)
+        first_server = service._server
+        service.start_discovery_server()
+        assert service._server is first_server
+        status, body = _wait_discovery(port, "/.well-known/oauth-authorization-server")
+        assert status == 200
+        assert body.get("registration_endpoint") == "/oauth/v2/register"
+        assert "378036683838275586" not in json.dumps(body)
+
+        status, raw = _http(
+            port,
+            "POST",
+            "/oauth/v2/register",
+            body=json.dumps({"redirect_uris": ["app://cb"]}).encode("utf-8"),
+            content_type="application/json",
+        )
+        payload = json.loads(raw.decode("utf-8"))
+        assert status == 200
+        assert payload["client_id"] == "configured-client"
+        assert payload["client_secret"] == "configured-secret"
+        assert "378036683838275586" not in json.dumps(payload)
+
+        status, _raw = _http(port, "POST", "/oauth/v2/register", body=b"{not-json", content_type="application/json")
+        assert status == 200
+
+        status, raw = _http(port, "OPTIONS", "/.well-known/oauth-protected-resource")
+        assert status == 200
+        assert raw == b""
+
+        status, _raw = _http(port, "POST", "/oauth/v2/other", body=b"{}")
+        assert status == 404
+    finally:
+        service.stop_discovery_server()
+        DIContainer.reset()
+
+
+def test_discovery_dcr_404_when_disabled_or_missing_client_id(monkeypatch):
+    import json
+
+    DIContainer.reset()
+    port = _oauth_free_port()
+    monkeypatch.setenv("OAUTH_DISCOVERY_PORT", str(port))
+    OAuthModule.for_root(
+        resource_uri="https://api.example.com",
+        authorization_servers=["https://idp.example.com"],
+        scopes_supported=["read"],
+        discovery_port=port,
+    )
+    service = DIContainer.get_instance().resolve(OAuthService)
+    service.start_discovery_server()
+    try:
+        _wait_discovery(port)
+        status, body = _wait_discovery(port, "/.well-known/oauth-authorization-server")
+        assert status == 200
+        assert "registration_endpoint" not in body
+
+        status, raw = _http(port, "POST", "/oauth/v2/register", body=b"{}", content_type="application/json")
+        assert status == 404
+        payload = json.loads(raw.decode("utf-8"))
+        assert payload["error"] == "not_found"
+        assert "378036683838275586" not in json.dumps(payload)
+    finally:
+        service.stop_discovery_server()
+        DIContainer.reset()
+
+    port2 = _oauth_free_port()
+    monkeypatch.setenv("OAUTH_DISCOVERY_PORT", str(port2))
+    OAuthModule.for_root(
+        resource_uri="https://api.example.com",
+        authorization_servers=["https://idp.example.com"],
+        scopes_supported=["read"],
+        discovery_port=port2,
+        enable_client_registration=True,
+    )
+    service2 = DIContainer.get_instance().resolve(OAuthService)
+    service2.start_discovery_server()
+    try:
+        _wait_discovery(port2)
+        status, _raw = _http(port2, "POST", "/oauth/v2/register", body=b"{}", content_type="application/json")
+        assert status == 404
+    finally:
+        service2.stop_discovery_server()
+        DIContainer.reset()
+
+
+def test_oauth_module_is_auth_required(monkeypatch):
+    monkeypatch.delenv("OAUTH_REQUIRED", raising=False)
+    assert OAuthModule.is_auth_required() is False
+    monkeypatch.setenv("OAUTH_REQUIRED", "true")
+    assert OAuthModule.is_auth_required() is True
+
+
+def test_stop_discovery_when_never_started():
+    service = OAuthService(
+        resource_uri="https://api.example.com",
+        authorization_servers=["https://idp.example.com"],
+        scopes_supported=["read"],
+    )
+    service.stop_discovery_server()
+
+
 if __name__ == "__main__":
     test_oauth_guard_validation()
     test_pkce_round_trip()
@@ -596,3 +991,14 @@ if __name__ == "__main__":
     test_explicit_introspection_arg_beats_env()
     test_introspection_client_credentials_resolve_from_env()
     print("\nAll OAuth tests passed successfully!")
+    test_for_root_requires_resource_and_servers()
+    test_introspect_http_active_and_inactive()
+    test_introspect_jwks_success_and_failure()
+    test_raise_if_invalid_and_www_authenticate()
+    test_oauth_guard_token_slots()
+    test_audience_defaults_to_resource_uri_or_custom()
+    test_token_cache_disabled_when_ttl_zero()
+    test_oauth_guard_required_rejects_wrong_audience_end_to_end()
+    test_discovery_server_idempotent_start_and_dcr_http()
+    test_discovery_dcr_404_when_disabled_or_missing_client_id()
+    test_stop_discovery_when_never_started()

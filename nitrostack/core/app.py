@@ -22,6 +22,7 @@ from nitrostack.core.decorators import ToolConfig, ResourceConfig, PromptConfig,
 from nitrostack.core.app_mode import get_app_mode, get_widget_mime_type, is_mcp_app_mode, is_openai_mode
 from nitrostack.core.di import DIContainer
 from nitrostack.core.errors import (
+    DependencyResolutionError,
     PromptNotFoundError,
     ResourceNotFoundError,
     TaskAlreadyTerminalError,
@@ -238,6 +239,81 @@ class _PromptEntry:
     method: Callable
 
 
+_AUTH_META_KEYS = ("authorization", "x-api-key", "token", "_oauth", "headers")
+
+
+def _auth_metadata_from_request_ctx(rc: Any) -> Dict[str, Any]:
+    """Copy host-sent auth slots from MCP request ``_meta`` into ExecutionContext.
+
+    Real transport headers (``rc.request.headers``) take precedence over
+    client-supplied ``_meta`` values: ``_meta`` is part of the JSON-RPC payload
+    and fully client-controlled, so it must not override credentials that were
+    presented (or vetted) at the transport layer. ``_meta`` remains the only
+    source on transports without HTTP headers (e.g. STDIO).
+    """
+    extra: Dict[str, Any] = {}
+    if rc is None:
+        return extra
+
+    raw_meta = getattr(rc, "meta", None)
+    data: Dict[str, Any] = {}
+    if raw_meta is not None:
+        extra_fields = getattr(raw_meta, "model_extra", None) or getattr(raw_meta, "__pydantic_extra__", None)
+        if isinstance(extra_fields, dict):
+            data.update(extra_fields)
+        if hasattr(raw_meta, "model_dump"):
+            try:
+                dumped = raw_meta.model_dump(exclude_none=True)
+                if isinstance(dumped, dict):
+                    data.update(dumped)
+            except Exception:
+                pass
+        elif isinstance(raw_meta, dict):
+            data.update(raw_meta)
+        else:
+            for key in _AUTH_META_KEYS:
+                value = getattr(raw_meta, key, None)
+                if value is not None:
+                    data[key] = value
+
+    auth = data.get("authorization") or data.get("Authorization")
+    if isinstance(auth, str) and auth.strip():
+        extra["authorization"] = auth
+    api_key = data.get("x-api-key")
+    if isinstance(api_key, str) and api_key.strip():
+        extra["x-api-key"] = api_key
+    token = data.get("token")
+    if isinstance(token, str) and token.strip():
+        extra["token"] = token
+    oauth = data.get("_oauth")
+    if isinstance(oauth, str) and oauth.strip():
+        extra["_oauth"] = oauth
+    headers = data.get("headers")
+    if isinstance(headers, dict):
+        extra["headers"] = headers
+        if "authorization" not in extra:
+            header_auth = headers.get("authorization") or headers.get("Authorization")
+            if isinstance(header_auth, str) and header_auth.strip():
+                extra["authorization"] = header_auth
+        if "x-api-key" not in extra:
+            header_key = headers.get("x-api-key") or headers.get("X-API-Key")
+            if isinstance(header_key, str) and header_key.strip():
+                extra["x-api-key"] = header_key
+
+    request = getattr(rc, "request", None)
+    headers_obj = getattr(request, "headers", None) if request is not None else None
+    if headers_obj is not None:
+        try:
+            http_auth = headers_obj.get("authorization") or headers_obj.get("Authorization")
+            if isinstance(http_auth, str) and http_auth.strip():
+                extra["authorization"] = http_auth
+            http_key = headers_obj.get("x-api-key") or headers_obj.get("X-API-Key")
+            if isinstance(http_key, str) and http_key.strip():
+                extra["x-api-key"] = http_key
+        except Exception:
+            pass
+    return extra
+
 class McpApplication:
     def __init__(self, app_class: Type):
         self.app_class = app_class
@@ -277,6 +353,7 @@ class McpApplication:
         self._resolve_modules(self.root_module, resolved_modules)
 
         container = DIContainer.get_instance()
+        self._assert_declared_dependencies(resolved_modules, container)
 
         # Instantiate all providers and controllers to populate container
         for mod in resolved_modules:
@@ -326,6 +403,37 @@ class McpApplication:
         #    onto the owned low-level server. This is factored out so additional server
         #    instances (e.g. one per HTTP session) can be configured identically.
         self._setup_handlers(self.mcp_server)
+
+    def _assert_declared_dependencies(
+        self, resolved_modules: Set[Type], container: DIContainer
+    ) -> None:
+        """Fail at bootstrap when a string ``deps=[...]`` token was never registered."""
+        missing: List[str] = []
+        seen: Set[Type] = set()
+
+        def walk(cls: Any) -> None:
+            if not isinstance(cls, type) or cls in seen:
+                return
+            seen.add(cls)
+            for dep in getattr(cls, "_mcp_deps", []) or []:
+                if isinstance(dep, str):
+                    if not container.has_value(dep) and dep not in container._registry:
+                        missing.append(f"{cls.__name__} -> '{dep}'")
+                elif isinstance(dep, type):
+                    walk(dep)
+
+        for mod in resolved_modules:
+            mod_config = getattr(mod, "_mcp_module_config", None)
+            if not mod_config:
+                continue
+            for cls in [*mod_config.providers, *mod_config.controllers]:
+                walk(cls)
+
+        if missing:
+            raise DependencyResolutionError(
+                "Missing dependency at app bootstrap (referenced in deps=[...] "
+                "but never registered): " + "; ".join(missing)
+            )
 
     def _resolve_modules(self, module_class: Type, resolved_modules: Set[Type]) -> None:
         if module_class in resolved_modules:
@@ -738,6 +846,7 @@ class McpApplication:
             if getattr(rc, "meta", None) is not None:
                 progress_token = rc.meta.progressToken
             session = getattr(rc, "session", None)
+        auth_meta = _auth_metadata_from_request_ctx(rc)
 
         is_task = (task_metadata is not None) or (cfg.task_support == "required")
         if cfg.task_support == "forbidden":
@@ -752,7 +861,7 @@ class McpApplication:
                 task_ctx = ExecutionContext(
                     request_id=str(uuid.uuid4()),
                     tool_name=cfg.name,
-                    metadata={"input": input_instance},
+                    metadata={"input": input_instance, **auth_meta},
                 )
                 task_ctx.task = TaskContext(
                     task_id,
@@ -788,21 +897,28 @@ class McpApplication:
             asyncio.create_task(background_execution())
             return types.CreateTaskResult(task=self._task_data_to_mcp_task(task))
 
-        ctx = ExecutionContext(request_id=str(uuid.uuid4()), tool_name=cfg.name, metadata={"input": input_instance})
-        result = await run_pipeline(
-            handler=entry.method,
-            handler_instance=entry.instance,
-            args=(input_instance, ctx),
-            kwargs={},
-            context=ctx,
-            guards=guards,
-            middleware=middleware,
-            interceptors=interceptors,
-            pipes=pipes,
-            filters=filters,
-            param_name="input",
-            param_type=entry.input_model,
-        )
+        ctx = ExecutionContext(request_id=str(uuid.uuid4()), tool_name=cfg.name, metadata={"input": input_instance, **auth_meta})
+        try:
+            result = await run_pipeline(
+                handler=entry.method,
+                handler_instance=entry.instance,
+                args=(input_instance, ctx),
+                kwargs={},
+                context=ctx,
+                guards=guards,
+                middleware=middleware,
+                interceptors=interceptors,
+                pipes=pipes,
+                filters=filters,
+                param_name="input",
+                param_type=entry.input_model,
+            )
+        except Exception as exc:
+            logger.exception("Tool %s failed", cfg.name)
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str(exc))],
+                isError=True,
+            )
         return self._to_call_tool_result(result, entry.component, ctx)
 
     async def _read_resource(self, uri: str) -> List[ReadResourceContents]:

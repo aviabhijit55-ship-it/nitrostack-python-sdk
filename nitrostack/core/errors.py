@@ -30,6 +30,29 @@ class ConfigurationError(Exception):
     pass
 
 
+class OAuthError(Exception):
+    """Base class for OAuth / token-validation failures."""
+
+
+class TokenInactiveError(OAuthError):
+    """Raised when introspection or JWT verification reports an inactive token."""
+
+    def __init__(self, message: str = "OAuth token is inactive or revoked"):
+        super().__init__(message)
+
+
+class AudienceMismatchError(OAuthError):
+    """Raised when a token audience / resource indicator does not match."""
+
+    def __init__(self, expected: Any = None, actual: Any = None):
+        self.expected = expected
+        self.actual = actual
+        if expected is not None:
+            super().__init__(f"Token audience mismatch: expected {expected!r}, got {actual!r}")
+        else:
+            super().__init__("Token audience mismatch")
+
+
 class TaskNotFoundError(Exception):
     """Raised when a task ID is not present in the TaskManager store."""
 

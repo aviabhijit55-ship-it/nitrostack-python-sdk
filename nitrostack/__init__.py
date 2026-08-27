@@ -48,6 +48,11 @@ from nitrostack.core.errors import (
     TaskAlreadyTerminalError,
     InvalidTaskTransitionError,
     TaskExpiredError,
+    ConfigurationError,
+    DependencyResolutionError,
+    OAuthError,
+    TokenInactiveError,
+    AudienceMismatchError,
 )
 from nitrostack.core.pipeline import (
     use_guards,
@@ -77,6 +82,21 @@ from nitrostack.auth.jwt import (
 from nitrostack.auth.oauth import (
     OAuthModule,
     OAuthService,
+    generate_www_authenticate_header,
+)
+from nitrostack.auth.pkce import (
+    generate_code_challenge,
+    generate_code_verifier,
+    generate_pkce_params,
+    is_valid_code_verifier,
+    validate_pkce_support,
+    verify_pkce,
+)
+from nitrostack.auth.scopes import (
+    has_all_scopes,
+    has_any_scope,
+    has_scope,
+    require_scopes,
 )
 from nitrostack.auth.config import (
     ConfigModule,
@@ -144,6 +164,22 @@ __all__ = [
     "JWTModule",
     "OAuthModule",
     "OAuthService",
+    "generate_www_authenticate_header",
+    "generate_code_challenge",
+    "generate_code_verifier",
+    "generate_pkce_params",
+    "is_valid_code_verifier",
+    "validate_pkce_support",
+    "verify_pkce",
+    "has_all_scopes",
+    "has_any_scope",
+    "has_scope",
+    "require_scopes",
+    "ConfigurationError",
+    "DependencyResolutionError",
+    "OAuthError",
+    "TokenInactiveError",
+    "AudienceMismatchError",
     "ConfigModule",
     "ConfigService",
     "NitroTestingModule",

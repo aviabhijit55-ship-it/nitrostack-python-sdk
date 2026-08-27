@@ -249,14 +249,18 @@ async def run_pipeline(
         current_next = call_target
         for interceptor_cls in reversed(interceptors):
             interceptor = container.resolve(interceptor_cls)
-            def make_interceptor_next(nxt):
-                return lambda: interceptor.intercept(context, nxt)
+
+            def make_interceptor_next(nxt, icpt=interceptor):
+                return lambda: icpt.intercept(context, nxt)
+
             current_next = make_interceptor_next(current_next)
 
         for middleware_cls in reversed(middleware):
             mw = container.resolve(middleware_cls)
-            def make_middleware_next(nxt):
-                return lambda: mw.use(context, nxt)
+
+            def make_middleware_next(nxt, middleware=mw):
+                return lambda: middleware.use(context, nxt)
+
             current_next = make_middleware_next(current_next)
 
         # Execute the chain

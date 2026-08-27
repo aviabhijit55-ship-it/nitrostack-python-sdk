@@ -1,0 +1,74 @@
+"""Phase 5 gap — `nitrostack-py install` without invoking a real pip."""
+from __future__ import annotations
+
+import os
+import sys
+from unittest.mock import patch
+
+import pytest
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from nitrostack.cli.install import (
+    _optional_extra_names,
+    _run_pip,
+    install_dependencies,
+)
+
+
+def test_optional_extra_names_parses_pyproject():
+    text = """
+[project]
+name = "demo"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+test = ["httpx"]
+
+[tool.ruff]
+line-length = 100
+"""
+    assert _optional_extra_names(text) == ["dev", "test"]
+
+
+def test_optional_extra_names_empty_when_section_missing():
+    assert _optional_extra_names("[project]\nname = 'x'\n") == []
+
+
+def test_install_requires_project_manifest(tmp_path):
+    with pytest.raises(RuntimeError, match="pyproject.toml or requirements.txt"):
+        install_dependencies(cwd=str(tmp_path))
+
+
+def test_install_editable_with_extras(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'demo'\n\n[project.optional-dependencies]\ndev = ['pytest']\n",
+        encoding="utf-8",
+    )
+    with patch("nitrostack.cli.install._run_pip") as run_pip:
+        install_dependencies(cwd=str(tmp_path), production=False)
+    run_pip.assert_called_once_with(["-e", ".[dev]"], cwd=str(tmp_path))
+
+
+def test_install_production_skips_extras_and_dev_files(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "requirements-dev.txt").write_text("pytest\n", encoding="utf-8")
+    with patch("nitrostack.cli.install._run_pip") as run_pip:
+        install_dependencies(cwd=str(tmp_path), production=True)
+    run_pip.assert_called_once_with(["-e", "."], cwd=str(tmp_path))
+
+
+def test_install_requirements_txt_and_dev_file(tmp_path):
+    (tmp_path / "requirements.txt").write_text("starlette\n", encoding="utf-8")
+    (tmp_path / "requirements-dev.txt").write_text("pytest\n", encoding="utf-8")
+    with patch("nitrostack.cli.install._run_pip") as run_pip:
+        install_dependencies(cwd=str(tmp_path), production=False)
+    assert run_pip.call_args_list[0].args[0] == ["-r", str(tmp_path / "requirements.txt")]
+    assert run_pip.call_args_list[1].args[0] == ["-r", str(tmp_path / "requirements-dev.txt")]
+
+
+def test_run_pip_raises_on_nonzero_exit(tmp_path):
+    with patch("nitrostack.cli.install.subprocess.run") as run:
+        run.return_value.returncode = 3
+        with pytest.raises(RuntimeError, match="exit code 3"):
+            _run_pip(["-e", "."], cwd=str(tmp_path))

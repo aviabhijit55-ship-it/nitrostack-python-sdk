@@ -15,6 +15,7 @@ from nitrostack.auth.oauth_module import (
     build_registration_response,
     is_client_registration_enabled,
 )
+from nitrostack.core.errors import AudienceMismatchError, ConfigurationError, TokenInactiveError
 
 
 def is_oauth_required() -> bool:
@@ -27,6 +28,25 @@ def is_oauth_required() -> bool:
 
 
 _oauth_fail_open_warned = False
+
+
+def generate_www_authenticate_header(
+    *,
+    realm: str = "mcp",
+    resource_metadata: Optional[str] = None,
+    error: Optional[str] = None,
+    error_description: Optional[str] = None,
+) -> str:
+    """RFC 6750 / RFC 9728 WWW-Authenticate value for protected MCP resources."""
+    parts = [f'Bearer realm="{realm}"']
+    if resource_metadata:
+        parts.append(f'resource_metadata="{resource_metadata}"')
+    if error:
+        parts.append(f'error="{error}"')
+    if error_description:
+        escaped = error_description.replace('"', "'")
+        parts.append(f'error_description="{escaped}"')
+    return ", ".join(parts)
 
 
 def warn_if_oauth_fail_open() -> None:
@@ -125,15 +145,34 @@ class OAuthService:
         registration_path = "/oauth/v2/register"
 
         def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: Dict[str, Any]) -> None:
+            raw = json.dumps(payload).encode("utf-8")
             handler.send_response(status)
             handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(raw)))
+            handler.send_header("Connection", "close")
             handler.end_headers()
-            handler.wfile.write(json.dumps(payload).encode("utf-8"))
+            handler.wfile.write(raw)
+
+        def _write_empty(handler: BaseHTTPRequestHandler, status: int) -> None:
+            handler.send_response(status)
+            handler.send_header("Content-Length", "0")
+            handler.send_header("Connection", "close")
+            handler.end_headers()
 
         class DiscoveryHandler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):
                 # Suppress server logging to stdout/stderr to keep stdio clean
                 pass
+
+            def do_OPTIONS(self):
+                # TS discovery handlers honor CORS preflight without leaking credentials.
+                self.send_response(200)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+                self.send_header("Content-Length", "0")
+                self.send_header("Connection", "close")
+                self.end_headers()
 
             def do_GET(self):
                 if self.path == "/.well-known/oauth-protected-resource":
@@ -148,13 +187,11 @@ class OAuthService:
                         build_authorization_server_metadata(service_instance, registration_endpoint),
                     )
                 else:
-                    self.send_response(404)
-                    self.end_headers()
+                    _write_empty(self, 404)
 
             def do_POST(self):
                 if self.path != registration_path:
-                    self.send_response(404)
-                    self.end_headers()
+                    _write_empty(self, 404)
                     return
 
                 if not is_client_registration_enabled(service_instance):
@@ -196,6 +233,16 @@ class OAuthService:
 
         self._thread = threading.Thread(target=run_server, daemon=True)
         self._thread.start()
+
+    def raise_if_invalid(self, token_info: Dict[str, Any]) -> Dict[str, Any]:
+        """Raise ``TokenInactiveError`` / ``AudienceMismatchError`` for an introspection result."""
+        if token_info.get("error") == "audience_mismatch" or (
+            token_info.get("active") and not self._validate_audience(token_info)
+        ):
+            raise AudienceMismatchError(self.audience, token_info.get("aud") or token_info.get("resource"))
+        if not token_info.get("active"):
+            raise TokenInactiveError()
+        return token_info
 
     def stop_discovery_server(self) -> None:
         if self._server:
@@ -379,6 +426,12 @@ class OAuthModule:
         static_client_id: Optional[str] = None,
         static_client_secret: Optional[str] = None,
     ):
+        if not resource_uri or not str(resource_uri).strip():
+            raise ConfigurationError("OAuthModule.for_root requires resource_uri")
+        if not authorization_servers:
+            raise ConfigurationError(
+                "OAuthModule.for_root requires at least one authorization server"
+            )
         service = OAuthService(
             resource_uri=resource_uri,
             authorization_servers=authorization_servers,
